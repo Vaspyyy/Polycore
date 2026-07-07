@@ -14,7 +14,7 @@ The project is currently in early private development. The goal is to create a p
 
 ## Status
 
-Polycore is currently **closed source** while the core systems are being designed, rewritten, broken, rebuilt, and probably over-scoped.
+Polycore is currently **source available** while the core systems are being designed, rewritten, broken, rebuilt, and probably over-scoped.
 
 Public builds, technical notes, and source access may happen later once the project is stable enough to show without causing psychic damage.
 
@@ -24,5 +24,5 @@ Built with Rust, Bevy, and WGPU.
 
 ## License
 
-All rights reserved for now.
+This project is source available under the [Polycore Source Available License v1.0](LICENSE.md). Non-commercial use, modification, and redistribution are permitted under strong copyleft terms — any derivative works must also be source available under the same license. Commercial use requires a separate license.
 
