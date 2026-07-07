@@ -5,6 +5,9 @@ use crate::{constants, rng::Rng};
 pub struct Shape;
 
 #[derive(Component)]
+pub struct Health(pub u32);
+
+#[derive(Component)]
 pub struct XpValue(pub u32);
 
 #[derive(Resource)]
@@ -43,18 +46,22 @@ pub fn shape_spawn(
     let x = (rng.next(constants::WINDOW_WIDTH as u32) as f32) - constants::WINDOW_WIDTH / 2.0;
     let y = (rng.next(constants::WINDOW_HEIGHT as u32) as f32) - constants::WINDOW_HEIGHT / 2.0;
 
-    let sides = 3 + rng.next(4) as usize;
+    let sides = 3 + rng.next(4) as u32;
+    let hp = constants::shape_health(sides);
+    let xp = constants::shape_xp(sides);
+
+    // Darker shade for higher-HP shapes
+    let t = (sides - 3) as f32 / 3.0; // 0.0 .. 1.0
+    let r = constants::ENEMY_COLOR[0] * (1.0 - t * 0.5);
+    let g = constants::ENEMY_COLOR[1] * (1.0 - t * 0.5);
+    let b = constants::ENEMY_COLOR[2] * (1.0 - t * 0.5);
 
     commands.spawn((
         Shape,
-        XpValue(constants::XP_PER_KILL),
-        Mesh2d(meshes.add(RegularPolygon::new(constants::SHAPE_RADIUS, sides as u32))),
-        MeshMaterial2d(materials.add(Color::srgba(
-            constants::ENEMY_COLOR[0],
-            constants::ENEMY_COLOR[1],
-            constants::ENEMY_COLOR[2],
-            constants::ENEMY_COLOR[3],
-        ))),
+        Health(hp),
+        XpValue(xp),
+        Mesh2d(meshes.add(RegularPolygon::new(constants::SHAPE_RADIUS, sides))),
+        MeshMaterial2d(materials.add(Color::srgba(r, g, b, 1.0))),
         Transform::from_xyz(x, y, 0.0),
     ));
 }

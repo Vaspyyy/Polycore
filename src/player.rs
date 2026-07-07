@@ -30,10 +30,10 @@ pub fn setup_player(
     commands.spawn((
         Mesh2d(meshes.add(Rectangle::new(4.0, constants::PLAYER_RADIUS + 10.0))),
         MeshMaterial2d(materials.add(Color::srgba(
-            constants::PLAYER_COLOR[0],
-            constants::PLAYER_COLOR[1],
-            constants::PLAYER_COLOR[2],
-            constants::PLAYER_COLOR[3],
+            constants::BARREL_COLOR[0],
+            constants::BARREL_COLOR[1],
+            constants::BARREL_COLOR[2],
+            constants::BARREL_COLOR[3],
         ))),
         Transform::from_xyz(0.0, constants::PLAYER_RADIUS / 2.0 + 5.0, 0.0),
     )).set_parent_in_place(player_id);
