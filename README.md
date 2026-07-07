@@ -1,7 +1,3 @@
-**Polycore** is way better. Clean, geometric, not “copyright dodge” cringe, and it fits the evolution/core-build angle perfectly. Your base concept is still “native geometric arena shooter with deeper design and AI,” so the name lands nicely. 
-
-# Polycore
-
 **Polycore** is an experimental native geometric arena shooter about movement, builds, evolution, and controlled chaos.
 
 The project is currently in early private development. The goal is to create a polished singleplayer-first arena game with fast combat, persistent progression, smart AI opponents, and deep tank evolution.
