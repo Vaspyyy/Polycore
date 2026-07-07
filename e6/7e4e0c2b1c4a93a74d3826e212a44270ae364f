@@ -1,0 +1,22 @@
+README.md
+  s_93eed5609ec194::t_3bc92f844c15de 17
+  s_93eed5609ec194::t_d13adcef99497e 27
+LICENSE.md
+  s_93eed5609ec194::t_7568934f28f4f9 1-58
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "e67e4e0c2b1c4a93a74d3826e212a44270ae364f",
+  "prompts": {},
+  "sessions": {
+    "s_93eed5609ec194": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0c31520e7ffeiUKkEeeyM7rdIp",
+        "model": "unknown"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
