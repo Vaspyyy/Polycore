@@ -1,0 +1,29 @@
+src/shape.rs
+  s_93eed5609ec194::t_065c5d29610f42 8-9,49-57,61-64
+  s_93eed5609ec194::t_b9a490060eb85a 7
+src/collision.rs
+  s_93eed5609ec194::t_b629832d82edd5 19
+  s_93eed5609ec194::t_f505515e125e40 2,7,18,22-26
+src/main.rs
+  s_93eed5609ec194::t_abe87b12880a41 37-38,54-87
+src/constants.rs
+  s_93eed5609ec194::t_5955f8bb4b71dd 28,30-36
+src/player.rs
+  s_93eed5609ec194::t_5e1a6fae92b717 33-36
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "82e9441141e2d84b96a947c1b283482c1247b256",
+  "prompts": {},
+  "sessions": {
+    "s_93eed5609ec194": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_0c31520e7ffeiUKkEeeyM7rdIp",
+        "model": "unknown"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
