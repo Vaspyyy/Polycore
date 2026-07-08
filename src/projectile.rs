@@ -1,5 +1,8 @@
+use crate::{
+    constants,
+    player::{Player, Velocity},
+};
 use bevy::prelude::*;
-use crate::{constants, player::{Player, Velocity}};
 
 #[derive(Component)]
 pub struct Projectile;
@@ -18,7 +21,9 @@ pub fn shoot_projectile(
     time: Res<Time>,
     mut player_query: Query<(&Transform, &mut ShootCooldown), With<Player>>,
 ) {
-    let Ok((transform, mut cooldown)) = player_query.single_mut() else { return };
+    let Ok((transform, mut cooldown)) = player_query.single_mut() else {
+        return;
+    };
 
     cooldown.0 -= time.delta_secs();
     if cooldown.0 > 0.0 {
@@ -32,7 +37,8 @@ pub fn shoot_projectile(
     cooldown.0 = constants::SHOOT_COOLDOWN;
 
     let direction = transform.rotation * Vec3::Y;
-    let spawn_pos = transform.translation + direction * (constants::PLAYER_RADIUS + constants::PROJECTILE_RADIUS + 4.0);
+    let spawn_pos = transform.translation
+        + direction * (constants::PLAYER_RADIUS + constants::PROJECTILE_RADIUS + 4.0);
 
     commands.spawn((
         Projectile,

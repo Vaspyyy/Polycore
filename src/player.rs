@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::{constants, projectile::ShootCooldown};
+use bevy::prelude::*;
 
 #[derive(Component)]
 pub struct Player;
@@ -31,6 +31,40 @@ pub struct MoveVelocity(pub Vec2);
 const BARREL_LENGTH: f32 = 34.0;
 const BARREL_WIDTH: f32 = 6.0;
 const BARREL_OVERLAP: f32 = 2.0;
+
+#[derive(Clone, Copy)]
+pub enum TankIconPartShape {
+    Circle { diameter: f32 },
+    Rectangle { width: f32, height: f32 },
+}
+
+#[derive(Clone, Copy)]
+pub struct TankIconPart {
+    pub shape: TankIconPartShape,
+    pub offset: Vec2,
+    pub rotation: f32,
+    pub color: [f32; 4],
+}
+
+pub fn tank_icon_parts() -> Vec<TankIconPart> {
+    vec![
+        TankIconPart {
+            shape: TankIconPartShape::Rectangle {
+                width: 10.0,
+                height: 46.0,
+            },
+            offset: Vec2::new(22.0, 22.0),
+            rotation: -0.75,
+            color: constants::BARREL_COLOR,
+        },
+        TankIconPart {
+            shape: TankIconPartShape::Circle { diameter: 54.0 },
+            offset: Vec2::ZERO,
+            rotation: 0.0,
+            color: constants::PLAYER_COLOR,
+        },
+    ]
+}
 
 fn barrel_center_distance() -> f32 {
     constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH / 2.0
@@ -112,15 +146,35 @@ pub fn setup_player(
 pub fn player_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
-    mut query: Query<(&mut Transform, &mut Velocity, &mut MoveVelocity, &mut DamageCooldown), With<Player>>,
+    mut query: Query<
+        (
+            &mut Transform,
+            &mut Velocity,
+            &mut MoveVelocity,
+            &mut DamageCooldown,
+        ),
+        With<Player>,
+    >,
 ) {
-    let Ok((mut transform, mut velocity, mut move_velocity, mut damage_cooldown)) = query.single_mut() else { return };
+    let Ok((mut transform, mut velocity, mut move_velocity, mut damage_cooldown)) =
+        query.single_mut()
+    else {
+        return;
+    };
 
     let mut direction = Vec2::ZERO;
-    if keyboard.pressed(KeyCode::KeyW) { direction.y += 1.0; }
-    if keyboard.pressed(KeyCode::KeyS) { direction.y -= 1.0; }
-    if keyboard.pressed(KeyCode::KeyA) { direction.x -= 1.0; }
-    if keyboard.pressed(KeyCode::KeyD) { direction.x += 1.0; }
+    if keyboard.pressed(KeyCode::KeyW) {
+        direction.y += 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyS) {
+        direction.y -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyA) {
+        direction.x -= 1.0;
+    }
+    if keyboard.pressed(KeyCode::KeyD) {
+        direction.x += 1.0;
+    }
 
     let direction = direction.normalize_or_zero();
     let dt = time.delta_secs();
@@ -152,14 +206,21 @@ pub fn player_aim(
     camera: Single<(&Camera, &GlobalTransform)>,
     mut query: Query<&mut Transform, With<Player>>,
 ) {
-    let Ok(mut transform) = query.single_mut() else { return };
+    let Ok(mut transform) = query.single_mut() else {
+        return;
+    };
 
-    let Some(cursor) = window.cursor_position() else { return };
-    let Ok(world_pos) = camera.0.viewport_to_world_2d(camera.1, cursor) else { return };
+    let Some(cursor) = window.cursor_position() else {
+        return;
+    };
+    let Ok(world_pos) = camera.0.viewport_to_world_2d(camera.1, cursor) else {
+        return;
+    };
 
     let delta = world_pos - transform.translation.xy();
     if delta.length_squared() > 0.001 {
-        transform.rotation = Quat::from_rotation_z(delta.y.atan2(delta.x) - std::f32::consts::FRAC_PI_2);
+        transform.rotation =
+            Quat::from_rotation_z(delta.y.atan2(delta.x) - std::f32::consts::FRAC_PI_2);
     }
 }
 
@@ -167,30 +228,56 @@ pub fn update_barrel(
     player: Query<&Transform, (With<Player>, Without<Barrel>)>,
     mut barrel: Query<&mut Transform, (With<Barrel>, Without<Player>)>,
 ) {
-    let Ok(player_transform) = player.single() else { return };
-    let Ok(mut barrel_transform) = barrel.single_mut() else { return };
+    let Ok(player_transform) = player.single() else {
+        return;
+    };
+    let Ok(mut barrel_transform) = barrel.single_mut() else {
+        return;
+    };
 
     let direction = player_transform.rotation * Vec3::Y;
-    barrel_transform.translation = player_transform.translation + direction * barrel_center_distance();
+    barrel_transform.translation =
+        player_transform.translation + direction * barrel_center_distance();
     barrel_transform.translation.z = 1.0;
     barrel_transform.rotation = player_transform.rotation;
 }
 
 pub fn update_health_bar(
     player: Query<(&Transform, &PlayerHealth), With<Player>>,
-    mut back: Query<(&mut Transform, &mut Visibility), (With<HealthBarBack>, Without<Player>, Without<HealthBarFill>)>,
-    mut fill: Query<(&mut Transform, &mut Visibility), (With<HealthBarFill>, Without<Player>, Without<HealthBarBack>)>,
+    mut back: Query<
+        (&mut Transform, &mut Visibility),
+        (With<HealthBarBack>, Without<Player>, Without<HealthBarFill>),
+    >,
+    mut fill: Query<
+        (&mut Transform, &mut Visibility),
+        (With<HealthBarFill>, Without<Player>, Without<HealthBarBack>),
+    >,
 ) {
-    let Ok((player_transform, health)) = player.single() else { return };
-    let Ok((mut back_transform, mut back_visibility)) = back.single_mut() else { return };
-    let Ok((mut fill_transform, mut fill_visibility)) = fill.single_mut() else { return };
+    let Ok((player_transform, health)) = player.single() else {
+        return;
+    };
+    let Ok((mut back_transform, mut back_visibility)) = back.single_mut() else {
+        return;
+    };
+    let Ok((mut fill_transform, mut fill_visibility)) = fill.single_mut() else {
+        return;
+    };
 
     let is_damaged = health.current < health.max;
-    *back_visibility = if is_damaged { Visibility::Visible } else { Visibility::Hidden };
-    *fill_visibility = if is_damaged { Visibility::Visible } else { Visibility::Hidden };
+    *back_visibility = if is_damaged {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+    *fill_visibility = if is_damaged {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
 
     let health_fraction = (health.current as f32 / health.max as f32).clamp(0.0, 1.0);
-    let bar_position = player_transform.translation + Vec3::new(0.0, constants::HEALTH_BAR_OFFSET_Y, 0.0);
+    let bar_position =
+        player_transform.translation + Vec3::new(0.0, constants::HEALTH_BAR_OFFSET_Y, 0.0);
 
     back_transform.translation = Vec3::new(bar_position.x, bar_position.y, 2.0);
     back_transform.rotation = Quat::IDENTITY;

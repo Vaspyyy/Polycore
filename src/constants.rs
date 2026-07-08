@@ -57,9 +57,17 @@ pub const GRID_SPACING: f32 = 64.0;
 pub const GRID_EXTENT: f32 = 2000.0;
 pub const BORDER_THICKNESS: f32 = 8.0;
 
-pub fn arena_half_extent() -> f32 { GRID_EXTENT / 2.0 }
+pub fn arena_half_extent() -> f32 {
+    GRID_EXTENT / 2.0
+}
 
 // Shape health/XP: sides - 1 = HP, HP * 5 = XP
-pub fn shape_health(sides: u32) -> u32 { (sides - 1).max(1) }
-pub fn shape_xp(sides: u32) -> u32 { shape_health(sides) * 5 }
-pub fn shape_damage(sides: u32) -> u32 { (sides - 2).max(1) * 5 }
+pub fn shape_health(sides: u32) -> u32 {
+    (sides - 1).max(1)
+}
+pub fn shape_xp(sides: u32) -> u32 {
+    shape_health(sides) * 5
+}
+pub fn shape_damage(sides: u32) -> u32 {
+    (sides - 2).max(1) * 5
+}

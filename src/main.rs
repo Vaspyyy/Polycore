@@ -1,24 +1,30 @@
-mod constants;
-mod rng;
-mod player;
-mod projectile;
-mod shape;
 mod collision;
+mod constants;
 mod hud;
 mod menu;
+mod player;
+mod projectile;
+mod rng;
+mod shape;
 
 use bevy::prelude::*;
 
 fn main() {
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: constants::WINDOW_TITLE.into(),
-                resolution: (constants::WINDOW_WIDTH as u32, constants::WINDOW_HEIGHT as u32).into(),
+        .add_plugins(
+            DefaultPlugins.set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: constants::WINDOW_TITLE.into(),
+                    resolution: (
+                        constants::WINDOW_WIDTH as u32,
+                        constants::WINDOW_HEIGHT as u32,
+                    )
+                        .into(),
+                    ..default()
+                }),
                 ..default()
             }),
-            ..default()
-        }))
+        )
         .insert_resource(ClearColor(Color::srgba(
             constants::BG_COLOR[0],
             constants::BG_COLOR[1],
@@ -28,43 +34,65 @@ fn main() {
         .insert_resource(rng::Rng::new(12345))
         .insert_resource(menu::GamePhase::Menu)
         .insert_resource(menu::GameMode::Singleplayer)
-        .insert_resource(menu::PlayerName(String::new()))
+        .insert_resource(menu::PlayerName::load())
         .insert_resource(menu::NameInputFocus::default())
-        .add_systems(Startup, (
-            setup_camera,
-            setup_grid,
-            player::setup_player,
-            shape::setup_xp,
-            hud::setup_hud,
-            menu::setup_menu,
-        ))
-        .add_systems(Update, (
-            menu::handle_play_button,
-            menu::handle_mode_buttons,
-            menu::update_mode_highlight,
-            menu::handle_name_field_clicks,
-            menu::handle_name_keyboard,
-            menu::sync_player_name_text,
-        ))
-        .add_systems(Update, (
-            player::player_aim,
-            player::update_barrel,
-            player::update_health_bar,
-            shape::update_shape_health_bars,
-            projectile::shoot_projectile,
-            camera_follow,
-            hud::update_hud,
-        ).chain().run_if(menu::is_playing))
-        .add_systems(FixedUpdate, (
-            player::player_movement,
-            shape::shape_knockback_update,
-            projectile::projectile_update,
-            shape::shape_spawn,
-            collision::check_collisions,
-            collision::check_player_shape_collisions,
-            collision::check_shape_shape_collisions,
-            shape::check_level_up,
-        ).chain().run_if(menu::is_playing))
+        .insert_resource(menu::RunStats::default())
+        .insert_resource(menu::DeathSummary::default())
+        .add_systems(
+            Startup,
+            (
+                setup_camera,
+                setup_grid,
+                player::setup_player,
+                shape::setup_xp,
+                hud::setup_hud,
+                menu::setup_menu,
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                menu::handle_play_button,
+                menu::handle_mode_buttons,
+                menu::update_mode_highlight,
+                menu::handle_name_field_clicks,
+                menu::handle_name_keyboard,
+                menu::sync_player_name_text,
+                menu::handle_death_buttons,
+                menu::sync_phase_visibility,
+                menu::sync_death_summary,
+                menu::tick_run_stats.run_if(menu::is_playing),
+            ),
+        )
+        .add_systems(
+            Update,
+            (
+                player::player_aim,
+                player::update_barrel,
+                player::update_health_bar,
+                shape::update_shape_health_bars,
+                projectile::shoot_projectile,
+                camera_follow,
+                hud::update_hud,
+            )
+                .chain()
+                .run_if(menu::is_playing),
+        )
+        .add_systems(
+            FixedUpdate,
+            (
+                player::player_movement,
+                shape::shape_knockback_update,
+                projectile::projectile_update,
+                shape::shape_spawn,
+                collision::check_collisions,
+                collision::check_player_shape_collisions,
+                collision::check_shape_shape_collisions,
+                shape::check_level_up,
+            )
+                .chain()
+                .run_if(menu::is_playing),
+        )
         .run();
 }
 
@@ -76,14 +104,24 @@ fn camera_follow(
     player: Query<&Transform, With<player::Player>>,
     mut camera: Query<&mut Transform, (With<Camera>, Without<player::Player>)>,
 ) {
-    let Ok(player_transform) = player.single() else { return };
-    let Ok(mut camera_transform) = camera.single_mut() else { return };
+    let Ok(player_transform) = player.single() else {
+        return;
+    };
+    let Ok(mut camera_transform) = camera.single_mut() else {
+        return;
+    };
     let half = constants::arena_half_extent();
     let max_camera_x = (half - constants::WINDOW_WIDTH / 2.0).max(0.0);
     let max_camera_y = (half - constants::WINDOW_HEIGHT / 2.0).max(0.0);
 
-    camera_transform.translation.x = player_transform.translation.x.clamp(-max_camera_x, max_camera_x);
-    camera_transform.translation.y = player_transform.translation.y.clamp(-max_camera_y, max_camera_y);
+    camera_transform.translation.x = player_transform
+        .translation
+        .x
+        .clamp(-max_camera_x, max_camera_x);
+    camera_transform.translation.y = player_transform
+        .translation
+        .y
+        .clamp(-max_camera_y, max_camera_y);
 }
 
 fn setup_grid(

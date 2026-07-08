@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use crate::{constants, player::Player, rng::Rng};
+use bevy::prelude::*;
 
 #[derive(Component)]
 pub struct Shape;
@@ -15,6 +15,23 @@ pub struct XpValue(pub u32);
 
 #[derive(Component)]
 pub struct ShapeDamage(pub u32);
+
+#[derive(Component)]
+pub struct ShapeKind {
+    pub sides: u32,
+}
+
+impl ShapeKind {
+    pub fn name(&self) -> &'static str {
+        match self.sides {
+            3 => "Triangle",
+            4 => "Square",
+            5 => "Pentagon",
+            6 => "Hexagon",
+            _ => "Shape",
+        }
+    }
+}
 
 #[derive(Component, Default)]
 pub struct ShapeVelocity(pub Vec2);
@@ -66,7 +83,9 @@ pub fn shape_spawn(
     }
     timer.0 = constants::SHAPE_SPAWN_INTERVAL;
 
-    let Ok(player_transform) = player.single() else { return };
+    let Ok(player_transform) = player.single() else {
+        return;
+    };
     let spawn_pos = random_spawn_position(player_transform.translation.xy(), &mut rng);
 
     let sides = 3 + rng.next(4) as u32;
@@ -108,6 +127,7 @@ pub fn shape_spawn(
             MaxHealth(hp),
             XpValue(xp),
             ShapeDamage(damage),
+            ShapeKind { sides },
             ShapeVelocity::default(),
             ShapeContactCooldown::default(),
             Mesh2d(meshes.add(RegularPolygon::new(constants::SHAPE_RADIUS, sides))),
@@ -163,14 +183,20 @@ fn random_spawn_position(player_pos: Vec2, rng: &mut Rng) -> Vec2 {
     ] {
         for direction in directions {
             let candidate = player_pos + direction * distance;
-            let candidate = Vec2::new(candidate.x.clamp(-half, half), candidate.y.clamp(-half, half));
+            let candidate = Vec2::new(
+                candidate.x.clamp(-half, half),
+                candidate.y.clamp(-half, half),
+            );
             if candidate.distance_squared(player_pos) >= safe_radius_sq {
                 return candidate;
             }
         }
     }
 
-    Vec2::new(player_pos.x.clamp(-half, half), player_pos.y.clamp(-half, half))
+    Vec2::new(
+        player_pos.x.clamp(-half, half),
+        player_pos.y.clamp(-half, half),
+    )
 }
 
 fn rng_offset(rng: &mut Rng, range: f32) -> f32 {
@@ -186,7 +212,14 @@ pub fn check_level_up(mut xp: ResMut<Xp>, mut level: ResMut<Level>) {
 
 pub fn shape_knockback_update(
     time: Res<Time>,
-    mut shapes: Query<(&mut Transform, &mut ShapeVelocity, &mut ShapeContactCooldown), With<Shape>>,
+    mut shapes: Query<
+        (
+            &mut Transform,
+            &mut ShapeVelocity,
+            &mut ShapeContactCooldown,
+        ),
+        With<Shape>,
+    >,
 ) {
     let dt = time.delta_secs();
     let half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
@@ -212,7 +245,11 @@ pub fn update_shape_health_bars(
 ) {
     for (health, max_health, children) in shapes.iter() {
         let is_damaged = health.0 < max_health.0;
-        let visibility = if is_damaged { Visibility::Visible } else { Visibility::Hidden };
+        let visibility = if is_damaged {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
         let health_fraction = (health.0 as f32 / max_health.0 as f32).clamp(0.0, 1.0);
 
         for child in children.iter() {
@@ -243,7 +280,8 @@ mod tests {
     #[test]
     fn spawn_position_stays_near_player_at_arena_edges() {
         let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
-        let safe_radius_sq = constants::SHAPE_SPAWN_SAFE_RADIUS * constants::SHAPE_SPAWN_SAFE_RADIUS;
+        let safe_radius_sq =
+            constants::SHAPE_SPAWN_SAFE_RADIUS * constants::SHAPE_SPAWN_SAFE_RADIUS;
         let player_half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
         let player_positions = [
             Vec2::new(-player_half, player_half),
@@ -260,7 +298,10 @@ mod tests {
                 assert!(spawn_pos.x >= -shape_half && spawn_pos.x <= shape_half);
                 assert!(spawn_pos.y >= -shape_half && spawn_pos.y <= shape_half);
                 assert!(spawn_pos.distance_squared(player_pos) >= safe_radius_sq);
-                assert!(spawn_pos.distance_squared(player_pos) <= constants::WINDOW_WIDTH * constants::WINDOW_WIDTH);
+                assert!(
+                    spawn_pos.distance_squared(player_pos)
+                        <= constants::WINDOW_WIDTH * constants::WINDOW_WIDTH
+                );
             }
         }
     }

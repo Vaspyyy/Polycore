@@ -1,5 +1,8 @@
+use crate::{
+    constants,
+    shape::{Level, TotalXp, Xp},
+};
 use bevy::prelude::*;
-use crate::{constants, shape::{Level, TotalXp, Xp}};
 
 #[derive(Component)]
 pub struct ScoreText;
