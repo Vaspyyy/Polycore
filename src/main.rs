@@ -5,6 +5,7 @@ mod projectile;
 mod shape;
 mod collision;
 mod hud;
+mod menu;
 
 use bevy::prelude::*;
 
@@ -25,26 +26,45 @@ fn main() {
             constants::BG_COLOR[3],
         )))
         .insert_resource(rng::Rng::new(12345))
+        .insert_resource(menu::GamePhase::Menu)
+        .insert_resource(menu::GameMode::Singleplayer)
+        .insert_resource(menu::PlayerName(String::new()))
+        .insert_resource(menu::NameInputFocus::default())
         .add_systems(Startup, (
             setup_camera,
+            setup_grid,
             player::setup_player,
             shape::setup_xp,
             hud::setup_hud,
+            menu::setup_menu,
+        ))
+        .add_systems(Update, (
+            menu::handle_play_button,
+            menu::handle_mode_buttons,
+            menu::update_mode_highlight,
+            menu::handle_name_field_clicks,
+            menu::handle_name_keyboard,
+            menu::sync_player_name_text,
         ))
         .add_systems(Update, (
             player::player_aim,
+            player::update_barrel,
+            player::update_health_bar,
+            shape::update_shape_health_bars,
             projectile::shoot_projectile,
             camera_follow,
-            draw_grid,
             hud::update_hud,
-        ).chain())
+        ).chain().run_if(menu::is_playing))
         .add_systems(FixedUpdate, (
             player::player_movement,
+            shape::shape_knockback_update,
             projectile::projectile_update,
             shape::shape_spawn,
             collision::check_collisions,
+            collision::check_player_shape_collisions,
+            collision::check_shape_shape_collisions,
             shape::check_level_up,
-        ).chain())
+        ).chain().run_if(menu::is_playing))
         .run();
 }
 
@@ -58,30 +78,76 @@ fn camera_follow(
 ) {
     let Ok(player_transform) = player.single() else { return };
     let Ok(mut camera_transform) = camera.single_mut() else { return };
-    camera_transform.translation.x = player_transform.translation.x;
-    camera_transform.translation.y = player_transform.translation.y;
+    let half = constants::arena_half_extent();
+    let max_camera_x = (half - constants::WINDOW_WIDTH / 2.0).max(0.0);
+    let max_camera_y = (half - constants::WINDOW_HEIGHT / 2.0).max(0.0);
+
+    camera_transform.translation.x = player_transform.translation.x.clamp(-max_camera_x, max_camera_x);
+    camera_transform.translation.y = player_transform.translation.y.clamp(-max_camera_y, max_camera_y);
 }
 
-fn draw_grid(mut gizmos: Gizmos) {
-    let color = Color::srgba(
+fn setup_grid(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    let grid_material = materials.add(Color::srgba(
         constants::GRID_COLOR[0],
         constants::GRID_COLOR[1],
         constants::GRID_COLOR[2],
         constants::GRID_COLOR[3],
-    );
+    ));
+    let border_material = materials.add(Color::srgba(
+        constants::BORDER_COLOR[0],
+        constants::BORDER_COLOR[1],
+        constants::BORDER_COLOR[2],
+        constants::BORDER_COLOR[3],
+    ));
     let extent = constants::GRID_EXTENT;
     let spacing = constants::GRID_SPACING;
-    let half = extent / 2.0;
+    let half = constants::arena_half_extent();
+    let thickness = 2.0;
+    let grid_z = -10.0;
+    let border_z = -9.0;
 
-    let start = -half;
-    let mut x = start;
+    let vertical_line = meshes.add(Rectangle::new(thickness, extent));
+    let horizontal_line = meshes.add(Rectangle::new(extent, thickness));
+
+    let mut x = -half;
     while x <= half {
-        gizmos.line_2d(Vec2::new(x, -half), Vec2::new(x, half), color);
+        commands.spawn((
+            Mesh2d(vertical_line.clone()),
+            MeshMaterial2d(grid_material.clone()),
+            Transform::from_xyz(x, 0.0, grid_z),
+        ));
         x += spacing;
     }
-    let mut y = start;
+
+    let mut y = -half;
     while y <= half {
-        gizmos.line_2d(Vec2::new(-half, y), Vec2::new(half, y), color);
+        commands.spawn((
+            Mesh2d(horizontal_line.clone()),
+            MeshMaterial2d(grid_material.clone()),
+            Transform::from_xyz(0.0, y, grid_z),
+        ));
         y += spacing;
+    }
+
+    let border_thickness = constants::BORDER_THICKNESS;
+    let vertical_border = meshes.add(Rectangle::new(border_thickness, extent + border_thickness));
+    let horizontal_border = meshes.add(Rectangle::new(extent + border_thickness, border_thickness));
+    for x in [-half, half] {
+        commands.spawn((
+            Mesh2d(vertical_border.clone()),
+            MeshMaterial2d(border_material.clone()),
+            Transform::from_xyz(x, 0.0, border_z),
+        ));
+    }
+    for y in [-half, half] {
+        commands.spawn((
+            Mesh2d(horizontal_border.clone()),
+            MeshMaterial2d(border_material.clone()),
+            Transform::from_xyz(0.0, y, border_z),
+        ));
     }
 }

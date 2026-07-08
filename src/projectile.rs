@@ -62,5 +62,9 @@ pub fn projectile_update(
             continue;
         }
         transform.translation += velocity.0.extend(0.0) * dt;
+        let half = constants::arena_half_extent() + constants::PROJECTILE_RADIUS;
+        if transform.translation.x.abs() > half || transform.translation.y.abs() > half {
+            commands.entity(entity).despawn();
+        }
     }
 }
