@@ -38,6 +38,7 @@ fn main() {
         .insert_resource(menu::NameInputFocus::default())
         .insert_resource(menu::RunStats::default())
         .insert_resource(menu::DeathSummary::default())
+        .insert_resource(hud::UpgradeState::default())
         .add_systems(
             Startup,
             (
@@ -61,6 +62,7 @@ fn main() {
                 menu::handle_death_buttons,
                 menu::sync_phase_visibility,
                 menu::sync_death_summary,
+                hud::update_upgrade_menu,
                 menu::tick_run_stats.run_if(menu::is_playing),
             ),
         )
@@ -74,6 +76,9 @@ fn main() {
                 projectile::shoot_projectile,
                 camera_follow,
                 hud::update_hud,
+                hud::animate_upgrade_fills,
+                hud::handle_upgrade_buttons,
+                hud::handle_upgrade_hotkeys,
             )
                 .chain()
                 .run_if(menu::is_playing),

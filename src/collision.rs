@@ -40,9 +40,13 @@ pub fn check_collisions(
             if dist_sq < collision_dist_sq {
                 commands.entity(*proj_entity).despawn();
                 let knockback_dir = (shape_pos.translation.xy() - *proj_pos).normalize_or_zero();
-                velocity.0 += knockback_dir * constants::SHAPE_KNOCKBACK_SPEED;
-                health.0 -= 1;
                 if health.0 == 0 {
+                    commands.entity(shape_entity).despawn();
+                    break;
+                }
+
+                velocity.0 += knockback_dir * constants::SHAPE_KNOCKBACK_SPEED;
+                if apply_shape_damage(&mut health, 1) {
                     commands.entity(shape_entity).despawn();
                     xp.0 += xp_val.0;
                     total_xp.0 += xp_val.0;
@@ -137,8 +141,10 @@ pub fn check_player_shape_collisions(
 }
 
 pub fn check_shape_shape_collisions(
+    mut commands: Commands,
     mut shapes: Query<
         (
+            Entity,
             &mut Transform,
             &mut Health,
             &mut ShapeVelocity,
@@ -150,15 +156,26 @@ pub fn check_shape_shape_collisions(
     let collision_distance = constants::SHAPE_RADIUS * 2.0;
     let collision_distance_sq = collision_distance * collision_distance;
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
+    let mut dead_shapes = Vec::new();
 
     let mut combinations = shapes.iter_combinations_mut::<2>();
     while let Some(
         [
-            (mut transform_a, mut health_a, mut velocity_a, mut cooldown_a),
-            (mut transform_b, mut health_b, mut velocity_b, mut cooldown_b),
+            (entity_a, mut transform_a, mut health_a, mut velocity_a, mut cooldown_a),
+            (entity_b, mut transform_b, mut health_b, mut velocity_b, mut cooldown_b),
         ],
     ) = combinations.fetch_next()
     {
+        if health_a.0 == 0 || health_b.0 == 0 {
+            if health_a.0 == 0 {
+                push_dead_shape(&mut dead_shapes, entity_a);
+            }
+            if health_b.0 == 0 {
+                push_dead_shape(&mut dead_shapes, entity_b);
+            }
+            continue;
+        }
+
         let pos_a = transform_a.translation.xy();
         let pos_b = transform_b.translation.xy();
         let delta = pos_a - pos_b;
@@ -188,12 +205,47 @@ pub fn check_shape_shape_collisions(
         velocity_b.0 -= normal * constants::SHAPE_SHAPE_KNOCKBACK_SPEED;
 
         if cooldown_a.0 <= 0.0 {
-            health_a.0 = health_a.0.saturating_sub(constants::SHAPE_SHAPE_DAMAGE);
+            if apply_shape_damage(&mut health_a, constants::SHAPE_SHAPE_DAMAGE) {
+                push_dead_shape(&mut dead_shapes, entity_a);
+            }
             cooldown_a.0 = constants::SHAPE_SHAPE_DAMAGE_COOLDOWN;
         }
         if cooldown_b.0 <= 0.0 {
-            health_b.0 = health_b.0.saturating_sub(constants::SHAPE_SHAPE_DAMAGE);
+            if apply_shape_damage(&mut health_b, constants::SHAPE_SHAPE_DAMAGE) {
+                push_dead_shape(&mut dead_shapes, entity_b);
+            }
             cooldown_b.0 = constants::SHAPE_SHAPE_DAMAGE_COOLDOWN;
         }
+    }
+
+    for entity in dead_shapes {
+        commands.entity(entity).despawn();
+    }
+}
+
+fn apply_shape_damage(health: &mut Health, damage: u32) -> bool {
+    let was_alive = health.0 > 0;
+    health.0 = health.0.saturating_sub(damage);
+    was_alive && health.0 == 0
+}
+
+fn push_dead_shape(dead_shapes: &mut Vec<Entity>, entity: Entity) {
+    if !dead_shapes.contains(&entity) {
+        dead_shapes.push(entity);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shape_damage_saturates_without_double_kill() {
+        let mut health = Health(1);
+
+        assert!(apply_shape_damage(&mut health, 1));
+        assert_eq!(health.0, 0);
+        assert!(!apply_shape_damage(&mut health, 1));
+        assert_eq!(health.0, 0);
     }
 }

@@ -1,4 +1,4 @@
-use crate::{constants, player::Player, rng::Rng};
+use crate::{constants, hud::UpgradeState, player::Player, rng::Rng};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -203,10 +203,15 @@ fn rng_offset(rng: &mut Rng, range: f32) -> f32 {
     rng.next(range as u32) as f32 - range / 2.0
 }
 
-pub fn check_level_up(mut xp: ResMut<Xp>, mut level: ResMut<Level>) {
+pub fn check_level_up(
+    mut xp: ResMut<Xp>,
+    mut level: ResMut<Level>,
+    mut upgrades: ResMut<UpgradeState>,
+) {
     while xp.0 >= constants::XP_PER_LEVEL {
         xp.0 -= constants::XP_PER_LEVEL;
         level.0 += 1;
+        upgrades.add_points(1);
     }
 }
 

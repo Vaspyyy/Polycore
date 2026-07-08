@@ -796,6 +796,7 @@ pub fn handle_death_buttons(
     mut total_xp: ResMut<shape::TotalXp>,
     mut level: ResMut<shape::Level>,
     mut spawn_timer: ResMut<shape::SpawnTimer>,
+    mut upgrades: ResMut<hud::UpgradeState>,
     mut buttons: Query<
         (
             &Interaction,
@@ -832,6 +833,7 @@ pub fn handle_death_buttons(
                     &mut total_xp,
                     &mut level,
                     &mut spawn_timer,
+                    &mut upgrades,
                     &shapes,
                     &projectiles,
                     &mut player_query,
@@ -867,6 +869,7 @@ fn reset_run(
     total_xp: &mut shape::TotalXp,
     level: &mut shape::Level,
     spawn_timer: &mut shape::SpawnTimer,
+    upgrades: &mut hud::UpgradeState,
     shapes: &Query<Entity, With<shape::Shape>>,
     projectiles: &Query<Entity, With<projectile::Projectile>>,
     player_query: &mut Query<
@@ -892,6 +895,7 @@ fn reset_run(
     total_xp.0 = 0;
     level.0 = 1;
     spawn_timer.0 = 0.0;
+    upgrades.reset();
 
     if let Ok((mut transform, mut health, mut damage_cooldown, mut velocity, mut move_velocity)) =
         player_query.single_mut()
