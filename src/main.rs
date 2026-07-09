@@ -1,5 +1,6 @@
 mod collision;
 mod constants;
+mod enemy_bot;
 mod evolution;
 mod hud;
 mod menu;
@@ -47,6 +48,7 @@ fn main() {
                 setup_camera,
                 setup_grid,
                 player::setup_player,
+                enemy_bot::setup_enemy_bots,
                 shape::setup_xp,
                 hud::setup_hud,
                 evolution::setup_evolution_menu,
@@ -64,6 +66,7 @@ fn main() {
                 menu::sync_player_name_text,
                 menu::handle_death_buttons,
                 menu::sync_phase_visibility,
+                enemy_bot::sync_enemy_bot_visibility,
                 menu::sync_death_summary,
                 evolution::queue_evolution_choices,
                 evolution::update_evolution_menu,
@@ -81,6 +84,8 @@ fn main() {
                 player::update_player_upgrade_stats,
                 player::regenerate_player_health,
                 player::update_health_bar,
+                enemy_bot::update_enemy_bot_health_bars,
+                enemy_bot::spin_enemy_bot_turrets,
                 shape::update_shape_health_bars,
                 projectile::shoot_projectile,
                 camera_follow,
@@ -96,11 +101,15 @@ fn main() {
             FixedUpdate,
             (
                 player::player_movement,
+                enemy_bot::enemy_bot_knockback_update,
                 shape::shape_knockback_update,
                 projectile::projectile_update,
                 shape::shape_spawn,
                 collision::check_collisions,
+                collision::check_projectile_enemy_bot_collisions,
+                collision::check_player_enemy_bot_collisions,
                 collision::check_player_shape_collisions,
+                collision::check_enemy_bot_shape_collisions,
                 collision::check_shape_shape_collisions,
                 shape::check_level_up,
             )

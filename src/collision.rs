@@ -1,5 +1,9 @@
 use crate::{
     constants,
+    enemy_bot::{
+        EnemyBot, EnemyBotDamageCooldown, EnemyBotHealth, EnemyBotName, EnemyBotVelocity,
+        apply_enemy_bot_damage,
+    },
     evolution::EvolutionState,
     hud::UpgradeState,
     menu::{DeathSummary, GamePhase, RunStats},
@@ -64,6 +68,64 @@ pub fn check_collisions(
                     commands.entity(shape_entity).despawn();
                     xp.0 += xp_val.0;
                     total_xp.0 += xp_val.0;
+                }
+                penetration.0 = penetration.0.saturating_sub(1);
+                if penetration.0 == 0 {
+                    commands.entity(proj_entity).despawn();
+                    break;
+                }
+            }
+        }
+    }
+}
+
+pub fn check_projectile_enemy_bot_collisions(
+    mut commands: Commands,
+    mut projectiles: Query<
+        (
+            Entity,
+            &Transform,
+            &ProjectileDamage,
+            &ProjectileKnockback,
+            &mut ProjectilePenetration,
+        ),
+        With<Projectile>,
+    >,
+    mut bots: Query<
+        (
+            &Transform,
+            &mut EnemyBotHealth,
+            &mut EnemyBotVelocity,
+            &mut Visibility,
+        ),
+        With<EnemyBot>,
+    >,
+) {
+    let collision_dist = constants::PROJECTILE_RADIUS + constants::PLAYER_RADIUS;
+    let collision_dist_sq = collision_dist * collision_dist;
+
+    for (proj_entity, proj_transform, projectile_damage, projectile_knockback, mut penetration) in
+        projectiles.iter_mut()
+    {
+        if penetration.0 == 0 {
+            commands.entity(proj_entity).despawn();
+            continue;
+        }
+
+        let proj_pos = proj_transform.translation.xy();
+        for (bot_transform, mut health, mut velocity, mut visibility) in bots.iter_mut() {
+            if health.current == 0 {
+                continue;
+            }
+
+            let dist_sq = proj_pos.distance_squared(bot_transform.translation.xy());
+            if dist_sq < collision_dist_sq {
+                let knockback_dir = (bot_transform.translation.xy() - proj_pos).normalize_or_zero();
+                velocity.0 += knockback_dir
+                    * constants::PLAYER_COLLISION_KNOCKBACK_SPEED
+                    * projectile_knockback.0;
+                if apply_enemy_bot_damage(&mut health, projectile_damage.0) {
+                    *visibility = Visibility::Hidden;
                 }
                 penetration.0 = penetration.0.saturating_sub(1);
                 if penetration.0 == 0 {
@@ -191,6 +253,186 @@ pub fn check_player_shape_collisions(
                 death_summary.tank_name = evolution.current_name.clone();
                 *phase = GamePhase::Dead;
                 break;
+            }
+        }
+    }
+}
+
+pub fn check_player_enemy_bot_collisions(
+    mut phase: ResMut<GamePhase>,
+    run_stats: Res<RunStats>,
+    upgrades: Res<UpgradeState>,
+    evolution: Res<EvolutionState>,
+    total_xp: Res<TotalXp>,
+    level: Res<crate::shape::Level>,
+    mut death_summary: ResMut<DeathSummary>,
+    mut player: Query<
+        (
+            &mut Transform,
+            &mut Velocity,
+            &mut PlayerHealth,
+            &mut DamageCooldown,
+        ),
+        (With<Player>, Without<EnemyBot>),
+    >,
+    mut bots: Query<
+        (
+            &mut Transform,
+            &mut EnemyBotVelocity,
+            &mut EnemyBotHealth,
+            &mut EnemyBotDamageCooldown,
+            &EnemyBotName,
+            &mut Visibility,
+        ),
+        (With<EnemyBot>, Without<Player>),
+    >,
+) {
+    let Ok((mut player_transform, mut player_velocity, mut player_health, mut damage_cooldown)) =
+        player.single_mut()
+    else {
+        return;
+    };
+    let collision_distance = constants::PLAYER_RADIUS * 2.0;
+    let collision_distance_sq = collision_distance * collision_distance;
+    let half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
+    let body_damage = upgrades.body_damage() + evolution.body_damage_bonus();
+
+    for (
+        mut bot_transform,
+        mut bot_velocity,
+        mut bot_health,
+        mut bot_damage_cooldown,
+        bot_name,
+        mut bot_visibility,
+    ) in bots.iter_mut()
+    {
+        if bot_health.current == 0 {
+            continue;
+        }
+
+        let player_pos = player_transform.translation.xy();
+        let bot_pos = bot_transform.translation.xy();
+        let delta = player_pos - bot_pos;
+        let distance_sq = delta.length_squared();
+
+        if distance_sq >= collision_distance_sq {
+            continue;
+        }
+
+        let distance = distance_sq.sqrt();
+        let normal = if distance > 0.001 {
+            delta / distance
+        } else {
+            Vec2::X
+        };
+        let penetration = collision_distance - distance;
+
+        player_transform.translation += (normal * penetration * 0.5).extend(0.0);
+        bot_transform.translation -= (normal * penetration * 0.5).extend(0.0);
+
+        player_transform.translation.x = player_transform.translation.x.clamp(-half, half);
+        player_transform.translation.y = player_transform.translation.y.clamp(-half, half);
+        bot_transform.translation.x = bot_transform.translation.x.clamp(-half, half);
+        bot_transform.translation.y = bot_transform.translation.y.clamp(-half, half);
+
+        player_velocity.0 += normal * constants::PLAYER_COLLISION_KNOCKBACK_SPEED;
+        bot_velocity.0 -= normal * constants::PLAYER_COLLISION_KNOCKBACK_SPEED;
+
+        if body_damage > 0 && bot_damage_cooldown.0 <= 0.0 {
+            if apply_enemy_bot_damage(&mut bot_health, body_damage) {
+                *bot_visibility = Visibility::Hidden;
+            }
+            bot_damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
+        }
+
+        if damage_cooldown.0 <= 0.0 {
+            player_health.current = player_health
+                .current
+                .saturating_sub(constants::shape_damage(4));
+            damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
+            if player_health.current == 0 {
+                death_summary.killed_by = bot_name.0.clone();
+                death_summary.score = total_xp.0;
+                death_summary.level = level.0;
+                death_summary.time_alive = run_stats.time_alive;
+                death_summary.tank_name = evolution.current_name.clone();
+                *phase = GamePhase::Dead;
+                break;
+            }
+        }
+    }
+}
+
+pub fn check_enemy_bot_shape_collisions(
+    mut bots: Query<
+        (
+            &mut Transform,
+            &mut EnemyBotVelocity,
+            &mut EnemyBotHealth,
+            &mut EnemyBotDamageCooldown,
+            &mut Visibility,
+        ),
+        (With<EnemyBot>, Without<Shape>),
+    >,
+    mut shapes: Query<
+        (&mut Transform, &mut ShapeVelocity, &ShapeDamage),
+        (With<Shape>, Without<EnemyBot>),
+    >,
+) {
+    let collision_distance = constants::PLAYER_RADIUS + constants::SHAPE_RADIUS;
+    let collision_distance_sq = collision_distance * collision_distance;
+    let bot_half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
+    let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
+
+    for (
+        mut bot_transform,
+        mut bot_velocity,
+        mut bot_health,
+        mut damage_cooldown,
+        mut visibility,
+    ) in bots.iter_mut()
+    {
+        if bot_health.current == 0 {
+            continue;
+        }
+
+        for (mut shape_transform, mut shape_velocity, shape_damage) in shapes.iter_mut() {
+            let bot_pos = bot_transform.translation.xy();
+            let shape_pos = shape_transform.translation.xy();
+            let delta = bot_pos - shape_pos;
+            let distance_sq = delta.length_squared();
+
+            if distance_sq >= collision_distance_sq {
+                continue;
+            }
+
+            let distance = distance_sq.sqrt();
+            let normal = if distance > 0.001 {
+                delta / distance
+            } else {
+                Vec2::X
+            };
+            let penetration = collision_distance - distance;
+
+            bot_transform.translation += (normal * penetration * 0.55).extend(0.0);
+            shape_transform.translation -= (normal * penetration * 0.45).extend(0.0);
+
+            bot_transform.translation.x = bot_transform.translation.x.clamp(-bot_half, bot_half);
+            bot_transform.translation.y = bot_transform.translation.y.clamp(-bot_half, bot_half);
+            shape_transform.translation.x =
+                shape_transform.translation.x.clamp(-shape_half, shape_half);
+            shape_transform.translation.y =
+                shape_transform.translation.y.clamp(-shape_half, shape_half);
+
+            bot_velocity.0 += normal * constants::PLAYER_COLLISION_KNOCKBACK_SPEED;
+            shape_velocity.0 -= normal * constants::SHAPE_COLLISION_KNOCKBACK_SPEED;
+
+            if damage_cooldown.0 <= 0.0 {
+                if apply_enemy_bot_damage(&mut bot_health, shape_damage.0) {
+                    *visibility = Visibility::Hidden;
+                    break;
+                }
+                damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
             }
         }
     }
