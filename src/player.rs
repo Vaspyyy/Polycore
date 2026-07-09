@@ -1,11 +1,19 @@
-use crate::{constants, hud::UpgradeState, projectile::ShootCooldown};
+use crate::{
+    constants,
+    evolution::{self, BarrelSpec, EvolutionState},
+    hud::UpgradeState,
+    projectile::ShootCooldown,
+};
 use bevy::prelude::*;
 
 #[derive(Component)]
 pub struct Player;
 
 #[derive(Component)]
-pub struct Barrel;
+pub struct Barrel {
+    pub slot: usize,
+    pub outline: bool,
+}
 
 #[derive(Component)]
 pub struct PlayerHealth {
@@ -28,8 +36,6 @@ pub struct Velocity(pub Vec2);
 #[derive(Component, Default)]
 pub struct MoveVelocity(pub Vec2);
 
-const BARREL_LENGTH: f32 = 30.6;
-const BARREL_WIDTH: f32 = 6.6;
 const BARREL_OVERLAP: f32 = 2.0;
 
 #[derive(Clone, Copy)]
@@ -66,12 +72,39 @@ pub fn tank_icon_parts() -> Vec<TankIconPart> {
     ]
 }
 
-fn barrel_center_distance() -> f32 {
-    constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH / 2.0
+fn barrel_center_distance(length: f32) -> f32 {
+    constants::PLAYER_RADIUS - BARREL_OVERLAP + length / 2.0
 }
 
-pub fn muzzle_projectile_distance() -> f32 {
-    constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH + constants::PROJECTILE_RADIUS
+pub fn muzzle_projectile_distance(length: f32) -> f32 {
+    constants::PLAYER_RADIUS - BARREL_OVERLAP + length + constants::PROJECTILE_RADIUS
+}
+
+pub fn barrel_local_axes(angle_offset: f32) -> (Vec2, Vec2) {
+    (
+        Vec2::new(-angle_offset.sin(), angle_offset.cos()),
+        Vec2::new(angle_offset.cos(), angle_offset.sin()),
+    )
+}
+
+fn barrel_transform(spec: BarrelSpec, outline: bool) -> Transform {
+    let (forward, right) = barrel_local_axes(spec.angle_offset);
+    let center = forward * barrel_center_distance(spec.length) + right * spec.lateral_offset;
+    let outline_growth = if outline {
+        constants::OUTLINE_THICKNESS * 2.0
+    } else {
+        0.0
+    };
+
+    Transform {
+        translation: Vec3::new(center.x, center.y, if outline { -0.2 } else { -0.1 }),
+        rotation: Quat::from_rotation_z(spec.angle_offset),
+        scale: Vec3::new(
+            spec.width + outline_growth,
+            spec.length + outline_growth,
+            1.0,
+        ),
+    }
 }
 
 pub fn setup_player(
@@ -84,6 +117,12 @@ pub fn setup_player(
         constants::OUTLINE_COLOR[1],
         constants::OUTLINE_COLOR[2],
         constants::OUTLINE_COLOR[3],
+    ));
+    let barrel_material = materials.add(Color::srgba(
+        constants::BARREL_COLOR[0],
+        constants::BARREL_COLOR[1],
+        constants::BARREL_COLOR[2],
+        constants::BARREL_COLOR[3],
     ));
 
     commands
@@ -115,29 +154,40 @@ pub fn setup_player(
                 MeshMaterial2d(outline_material.clone()),
                 Transform::from_xyz(0.0, 0.0, -0.2),
             ));
-            player.spawn((
-                Mesh2d(meshes.add(Rectangle::new(
-                    BARREL_WIDTH + constants::OUTLINE_THICKNESS * 2.0,
-                    BARREL_LENGTH + constants::OUTLINE_THICKNESS * 2.0,
-                ))),
-                MeshMaterial2d(outline_material),
-                Transform::from_xyz(0.0, barrel_center_distance(), -0.2),
-            ));
+            let barrel_mesh = meshes.add(Rectangle::new(1.0, 1.0));
+            let specs = EvolutionState::default().barrel_specs();
+            for slot in 0..evolution::MAX_BARRELS {
+                let spec = specs.get(slot).copied().unwrap_or(specs[0]);
+                player.spawn((
+                    Barrel {
+                        slot,
+                        outline: true,
+                    },
+                    Mesh2d(barrel_mesh.clone()),
+                    MeshMaterial2d(outline_material.clone()),
+                    barrel_transform(spec, true),
+                    if slot == 0 {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    },
+                ));
+                player.spawn((
+                    Barrel {
+                        slot,
+                        outline: false,
+                    },
+                    Mesh2d(barrel_mesh.clone()),
+                    MeshMaterial2d(barrel_material.clone()),
+                    barrel_transform(spec, false),
+                    if slot == 0 {
+                        Visibility::Visible
+                    } else {
+                        Visibility::Hidden
+                    },
+                ));
+            }
         });
-
-    // Turret barrel (rectangle indicating aim direction)
-    commands.spawn((
-        Barrel,
-        Mesh2d(meshes.add(Rectangle::new(BARREL_WIDTH, BARREL_LENGTH))),
-        MeshMaterial2d(materials.add(Color::srgba(
-            constants::BARREL_COLOR[0],
-            constants::BARREL_COLOR[1],
-            constants::BARREL_COLOR[2],
-            constants::BARREL_COLOR[3],
-        ))),
-        Transform::from_xyz(0.0, barrel_center_distance(), 1.0),
-        Visibility::Hidden,
-    ));
 
     commands.spawn((
         HealthBarBack,
@@ -176,6 +226,7 @@ pub fn player_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
     upgrades: Res<UpgradeState>,
+    evolution: Res<EvolutionState>,
     mut query: Query<
         (
             &mut Transform,
@@ -208,7 +259,7 @@ pub fn player_movement(
 
     let direction = direction.normalize_or_zero();
     let dt = time.delta_secs();
-    let movement_speed = upgrades.movement_speed();
+    let movement_speed = upgrades.movement_speed() * evolution.movement_multiplier();
     let target_velocity = direction * movement_speed;
     let acceleration = movement_speed / constants::PLAYER_ACCEL_TIME;
     move_velocity.0 = approach_velocity(move_velocity.0, target_velocity, acceleration * dt);
@@ -225,16 +276,17 @@ pub fn player_movement(
 
 pub fn update_player_upgrade_stats(
     upgrades: Res<UpgradeState>,
+    evolution: Res<EvolutionState>,
     mut player: Query<&mut PlayerHealth, With<Player>>,
 ) {
-    if !upgrades.is_changed() {
+    if !(upgrades.is_changed() || evolution.is_changed()) {
         return;
     }
 
     let Ok(mut health) = player.single_mut() else {
         return;
     };
-    let upgraded_max = upgrades.max_health();
+    let upgraded_max = (upgrades.max_health() as i32 + evolution.max_health_bonus()).max(40) as u32;
     if health.max == upgraded_max {
         return;
     }
@@ -247,10 +299,11 @@ pub fn update_player_upgrade_stats(
 pub fn regenerate_player_health(
     time: Res<Time>,
     upgrades: Res<UpgradeState>,
+    evolution: Res<EvolutionState>,
     mut heal_progress: Local<f32>,
     mut player: Query<&mut PlayerHealth, With<Player>>,
 ) {
-    let regen_per_second = upgrades.health_regen_per_second();
+    let regen_per_second = upgrades.health_regen_per_second() + evolution.health_regen_bonus();
     if regen_per_second <= 0.0 {
         *heal_progress = 0.0;
         return;
@@ -307,21 +360,19 @@ pub fn player_aim(
 }
 
 pub fn update_barrel(
-    player: Query<&Transform, (With<Player>, Without<Barrel>)>,
-    mut barrel: Query<&mut Transform, (With<Barrel>, Without<Player>)>,
+    evolution: Res<EvolutionState>,
+    mut barrels: Query<(&Barrel, &mut Transform, &mut Visibility)>,
 ) {
-    let Ok(player_transform) = player.single() else {
-        return;
-    };
-    let Ok(mut barrel_transform) = barrel.single_mut() else {
-        return;
-    };
+    let specs = evolution.barrel_specs();
+    for (barrel, mut transform, mut visibility) in barrels.iter_mut() {
+        let Some(spec) = specs.get(barrel.slot).copied() else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
 
-    let direction = player_transform.rotation * Vec3::Y;
-    barrel_transform.translation =
-        player_transform.translation + direction * barrel_center_distance();
-    barrel_transform.translation.z = 1.0;
-    barrel_transform.rotation = player_transform.rotation;
+        *visibility = Visibility::Visible;
+        *transform = barrel_transform(spec, barrel.outline);
+    }
 }
 
 pub fn update_health_bar(
@@ -392,8 +443,9 @@ mod tests {
 
     #[test]
     fn projectile_spawn_distance_is_past_barrel_tip() {
-        let barrel_tip_distance = constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH;
+        let barrel_length = EvolutionState::default().barrel_specs()[0].length;
+        let barrel_tip_distance = constants::PLAYER_RADIUS - BARREL_OVERLAP + barrel_length;
 
-        assert!(muzzle_projectile_distance() > barrel_tip_distance);
+        assert!(muzzle_projectile_distance(barrel_length) > barrel_tip_distance);
     }
 }

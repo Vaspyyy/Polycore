@@ -1,5 +1,6 @@
 mod collision;
 mod constants;
+mod evolution;
 mod hud;
 mod menu;
 mod player;
@@ -39,6 +40,7 @@ fn main() {
         .insert_resource(menu::RunStats::default())
         .insert_resource(menu::DeathSummary::default())
         .insert_resource(hud::UpgradeState::default())
+        .insert_resource(evolution::EvolutionState::default())
         .add_systems(
             Startup,
             (
@@ -47,6 +49,7 @@ fn main() {
                 player::setup_player,
                 shape::setup_xp,
                 hud::setup_hud,
+                evolution::setup_evolution_menu,
                 menu::setup_menu,
             ),
         )
@@ -62,6 +65,10 @@ fn main() {
                 menu::handle_death_buttons,
                 menu::sync_phase_visibility,
                 menu::sync_death_summary,
+                evolution::queue_evolution_choices,
+                evolution::update_evolution_menu,
+                evolution::handle_evolution_buttons,
+                evolution::update_evolution_hover_description,
                 hud::update_upgrade_menu,
                 menu::tick_run_stats.run_if(menu::is_playing),
             ),

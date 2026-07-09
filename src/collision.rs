@@ -1,9 +1,10 @@
 use crate::{
     constants,
+    evolution::EvolutionState,
     hud::UpgradeState,
     menu::{DeathSummary, GamePhase, RunStats},
     player::{DamageCooldown, Player, PlayerHealth, Velocity},
-    projectile::{Projectile, ProjectileDamage, ProjectilePenetration},
+    projectile::{Projectile, ProjectileDamage, ProjectileKnockback, ProjectilePenetration},
     shape::{
         Health, Shape, ShapeContactCooldown, ShapeDamage, ShapeKind, ShapeVelocity, TotalXp, Xp,
         XpValue,
@@ -18,6 +19,7 @@ pub fn check_collisions(
             Entity,
             &Transform,
             &ProjectileDamage,
+            &ProjectileKnockback,
             &mut ProjectilePenetration,
         ),
         With<Projectile>,
@@ -38,7 +40,8 @@ pub fn check_collisions(
     let collision_dist = constants::PROJECTILE_RADIUS + constants::SHAPE_RADIUS;
     let collision_dist_sq = collision_dist * collision_dist;
 
-    for (proj_entity, proj_transform, projectile_damage, mut penetration) in projectiles.iter_mut()
+    for (proj_entity, proj_transform, projectile_damage, projectile_knockback, mut penetration) in
+        projectiles.iter_mut()
     {
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
@@ -55,7 +58,8 @@ pub fn check_collisions(
                 }
 
                 let knockback_dir = (shape_pos.translation.xy() - proj_pos).normalize_or_zero();
-                velocity.0 += knockback_dir * constants::SHAPE_KNOCKBACK_SPEED;
+                velocity.0 +=
+                    knockback_dir * constants::SHAPE_KNOCKBACK_SPEED * projectile_knockback.0;
                 if apply_shape_damage(&mut health, projectile_damage.0) {
                     commands.entity(shape_entity).despawn();
                     xp.0 += xp_val.0;
@@ -76,6 +80,7 @@ pub fn check_player_shape_collisions(
     mut phase: ResMut<GamePhase>,
     run_stats: Res<RunStats>,
     upgrades: Res<UpgradeState>,
+    evolution: Res<EvolutionState>,
     mut xp: ResMut<Xp>,
     mut total_xp: ResMut<TotalXp>,
     level: Res<crate::shape::Level>,
@@ -112,7 +117,7 @@ pub fn check_player_shape_collisions(
     let collision_distance_sq = collision_distance * collision_distance;
     let player_half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
-    let body_damage = upgrades.body_damage();
+    let body_damage = upgrades.body_damage() + evolution.body_damage_bonus();
 
     for (
         shape_entity,
@@ -183,7 +188,7 @@ pub fn check_player_shape_collisions(
                 death_summary.score = total_xp.0;
                 death_summary.level = level.0;
                 death_summary.time_alive = run_stats.time_alive;
-                death_summary.tank_name = "Tank".to_string();
+                death_summary.tank_name = evolution.current_name.clone();
                 *phase = GamePhase::Dead;
                 break;
             }

@@ -1,4 +1,4 @@
-use crate::{constants, hud, player, projectile, shape};
+use crate::{constants, evolution, hud, player, projectile, shape};
 use bevy::{
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
@@ -797,6 +797,7 @@ pub fn handle_death_buttons(
     mut level: ResMut<shape::Level>,
     mut spawn_timer: ResMut<shape::SpawnTimer>,
     mut upgrades: ResMut<hud::UpgradeState>,
+    mut evolutions: ResMut<evolution::EvolutionState>,
     mut buttons: Query<
         (
             &Interaction,
@@ -834,6 +835,7 @@ pub fn handle_death_buttons(
                     &mut level,
                     &mut spawn_timer,
                     &mut upgrades,
+                    &mut evolutions,
                     &shapes,
                     &projectiles,
                     &mut player_query,
@@ -870,6 +872,7 @@ fn reset_run(
     level: &mut shape::Level,
     spawn_timer: &mut shape::SpawnTimer,
     upgrades: &mut hud::UpgradeState,
+    evolutions: &mut evolution::EvolutionState,
     shapes: &Query<Entity, With<shape::Shape>>,
     projectiles: &Query<Entity, With<projectile::Projectile>>,
     player_query: &mut Query<
@@ -896,6 +899,7 @@ fn reset_run(
     level.0 = 1;
     spawn_timer.0 = 0.0;
     upgrades.reset();
+    evolutions.reset();
 
     if let Ok((mut transform, mut health, mut damage_cooldown, mut velocity, mut move_velocity)) =
         player_query.single_mut()
