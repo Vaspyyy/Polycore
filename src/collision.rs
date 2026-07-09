@@ -1,8 +1,9 @@
 use crate::{
     constants,
+    hud::UpgradeState,
     menu::{DeathSummary, GamePhase, RunStats},
     player::{DamageCooldown, Player, PlayerHealth, Velocity},
-    projectile::Projectile,
+    projectile::{Projectile, ProjectileDamage, ProjectilePenetration},
     shape::{
         Health, Shape, ShapeContactCooldown, ShapeDamage, ShapeKind, ShapeVelocity, TotalXp, Xp,
         XpValue,
@@ -12,7 +13,15 @@ use bevy::prelude::*;
 
 pub fn check_collisions(
     mut commands: Commands,
-    projectiles: Query<(Entity, &Transform), With<Projectile>>,
+    mut projectiles: Query<
+        (
+            Entity,
+            &Transform,
+            &ProjectileDamage,
+            &mut ProjectilePenetration,
+        ),
+        With<Projectile>,
+    >,
     mut shapes: Query<
         (
             Entity,
@@ -26,41 +35,49 @@ pub fn check_collisions(
     mut xp: ResMut<Xp>,
     mut total_xp: ResMut<TotalXp>,
 ) {
-    let proj_data: Vec<(Entity, Vec2)> = projectiles
-        .iter()
-        .map(|(e, t)| (e, t.translation.xy()))
-        .collect();
-
     let collision_dist = constants::PROJECTILE_RADIUS + constants::SHAPE_RADIUS;
     let collision_dist_sq = collision_dist * collision_dist;
 
-    for (proj_entity, proj_pos) in &proj_data {
+    for (proj_entity, proj_transform, projectile_damage, mut penetration) in projectiles.iter_mut()
+    {
+        if penetration.0 == 0 {
+            commands.entity(proj_entity).despawn();
+            continue;
+        }
+
+        let proj_pos = proj_transform.translation.xy();
         for (shape_entity, shape_pos, mut health, xp_val, mut velocity) in shapes.iter_mut() {
             let dist_sq = proj_pos.distance_squared(shape_pos.translation.xy());
             if dist_sq < collision_dist_sq {
-                commands.entity(*proj_entity).despawn();
-                let knockback_dir = (shape_pos.translation.xy() - *proj_pos).normalize_or_zero();
                 if health.0 == 0 {
                     commands.entity(shape_entity).despawn();
-                    break;
+                    continue;
                 }
 
+                let knockback_dir = (shape_pos.translation.xy() - proj_pos).normalize_or_zero();
                 velocity.0 += knockback_dir * constants::SHAPE_KNOCKBACK_SPEED;
-                if apply_shape_damage(&mut health, 1) {
+                if apply_shape_damage(&mut health, projectile_damage.0) {
                     commands.entity(shape_entity).despawn();
                     xp.0 += xp_val.0;
                     total_xp.0 += xp_val.0;
                 }
-                break;
+                penetration.0 = penetration.0.saturating_sub(1);
+                if penetration.0 == 0 {
+                    commands.entity(proj_entity).despawn();
+                    break;
+                }
             }
         }
     }
 }
 
 pub fn check_player_shape_collisions(
+    mut commands: Commands,
     mut phase: ResMut<GamePhase>,
     run_stats: Res<RunStats>,
-    total_xp: Res<TotalXp>,
+    upgrades: Res<UpgradeState>,
+    mut xp: ResMut<Xp>,
+    mut total_xp: ResMut<TotalXp>,
     level: Res<crate::shape::Level>,
     mut death_summary: ResMut<DeathSummary>,
     mut player: Query<
@@ -73,7 +90,16 @@ pub fn check_player_shape_collisions(
         (With<Player>, Without<Shape>),
     >,
     mut shapes: Query<
-        (&mut Transform, &mut ShapeVelocity, &ShapeDamage, &ShapeKind),
+        (
+            Entity,
+            &mut Transform,
+            &mut ShapeVelocity,
+            &ShapeDamage,
+            &ShapeKind,
+            &mut Health,
+            &mut ShapeContactCooldown,
+            &XpValue,
+        ),
         (With<Shape>, Without<Player>),
     >,
 ) {
@@ -86,8 +112,19 @@ pub fn check_player_shape_collisions(
     let collision_distance_sq = collision_distance * collision_distance;
     let player_half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
+    let body_damage = upgrades.body_damage();
 
-    for (mut shape_transform, mut shape_velocity, shape_damage, shape_kind) in shapes.iter_mut() {
+    for (
+        shape_entity,
+        mut shape_transform,
+        mut shape_velocity,
+        shape_damage,
+        shape_kind,
+        mut shape_health,
+        mut shape_contact_cooldown,
+        xp_value,
+    ) in shapes.iter_mut()
+    {
         let player_pos = player_transform.translation.xy();
         let shape_pos = shape_transform.translation.xy();
         let delta = player_pos - shape_pos;
@@ -123,6 +160,20 @@ pub fn check_player_shape_collisions(
 
         player_velocity.0 += normal * constants::PLAYER_COLLISION_KNOCKBACK_SPEED;
         shape_velocity.0 -= normal * constants::SHAPE_COLLISION_KNOCKBACK_SPEED;
+
+        if body_damage > 0 && shape_contact_cooldown.0 <= 0.0 {
+            if shape_health.0 == 0 {
+                commands.entity(shape_entity).despawn();
+                continue;
+            }
+
+            if apply_shape_damage(&mut shape_health, body_damage) {
+                commands.entity(shape_entity).despawn();
+                xp.0 += xp_value.0;
+                total_xp.0 += xp_value.0;
+            }
+            shape_contact_cooldown.0 = constants::SHAPE_SHAPE_DAMAGE_COOLDOWN;
+        }
 
         if damage_cooldown.0 <= 0.0 {
             player_health.current = player_health.current.saturating_sub(shape_damage.0);

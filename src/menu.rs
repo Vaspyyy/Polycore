@@ -1,4 +1,4 @@
-use crate::{hud, player, projectile, shape};
+use crate::{constants, hud, player, projectile, shape};
 use bevy::{
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
@@ -902,6 +902,7 @@ fn reset_run(
     {
         transform.translation = Vec3::ZERO;
         transform.rotation = Quat::IDENTITY;
+        health.max = constants::PLAYER_MAX_HEALTH;
         health.current = health.max;
         damage_cooldown.0 = 0.0;
         velocity.0 = Vec2::ZERO;

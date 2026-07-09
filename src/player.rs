@@ -1,4 +1,4 @@
-use crate::{constants, projectile::ShootCooldown};
+use crate::{constants, hud::UpgradeState, projectile::ShootCooldown};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -28,8 +28,8 @@ pub struct Velocity(pub Vec2);
 #[derive(Component, Default)]
 pub struct MoveVelocity(pub Vec2);
 
-const BARREL_LENGTH: f32 = 34.0;
-const BARREL_WIDTH: f32 = 6.0;
+const BARREL_LENGTH: f32 = 30.6;
+const BARREL_WIDTH: f32 = 6.6;
 const BARREL_OVERLAP: f32 = 2.0;
 
 #[derive(Clone, Copy)]
@@ -68,6 +68,10 @@ pub fn tank_icon_parts() -> Vec<TankIconPart> {
 
 fn barrel_center_distance() -> f32 {
     constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH / 2.0
+}
+
+pub fn muzzle_projectile_distance() -> f32 {
+    constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH + constants::PROJECTILE_RADIUS
 }
 
 pub fn setup_player(
@@ -146,6 +150,7 @@ pub fn setup_player(
 pub fn player_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
+    upgrades: Res<UpgradeState>,
     mut query: Query<
         (
             &mut Transform,
@@ -178,8 +183,9 @@ pub fn player_movement(
 
     let direction = direction.normalize_or_zero();
     let dt = time.delta_secs();
-    let target_velocity = direction * constants::PLAYER_SPEED;
-    let acceleration = constants::PLAYER_SPEED / constants::PLAYER_ACCEL_TIME;
+    let movement_speed = upgrades.movement_speed();
+    let target_velocity = direction * movement_speed;
+    let acceleration = movement_speed / constants::PLAYER_ACCEL_TIME;
     move_velocity.0 = approach_velocity(move_velocity.0, target_velocity, acceleration * dt);
     transform.translation += (move_velocity.0 + velocity.0).extend(0.0) * dt;
 
@@ -190,6 +196,57 @@ pub fn player_movement(
     let half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
     transform.translation.x = transform.translation.x.clamp(-half, half);
     transform.translation.y = transform.translation.y.clamp(-half, half);
+}
+
+pub fn update_player_upgrade_stats(
+    upgrades: Res<UpgradeState>,
+    mut player: Query<&mut PlayerHealth, With<Player>>,
+) {
+    if !upgrades.is_changed() {
+        return;
+    }
+
+    let Ok(mut health) = player.single_mut() else {
+        return;
+    };
+    let upgraded_max = upgrades.max_health();
+    if health.max == upgraded_max {
+        return;
+    }
+
+    let missing_health = health.max.saturating_sub(health.current);
+    health.max = upgraded_max;
+    health.current = upgraded_max.saturating_sub(missing_health);
+}
+
+pub fn regenerate_player_health(
+    time: Res<Time>,
+    upgrades: Res<UpgradeState>,
+    mut heal_progress: Local<f32>,
+    mut player: Query<&mut PlayerHealth, With<Player>>,
+) {
+    let regen_per_second = upgrades.health_regen_per_second();
+    if regen_per_second <= 0.0 {
+        *heal_progress = 0.0;
+        return;
+    }
+
+    let Ok(mut health) = player.single_mut() else {
+        return;
+    };
+    if health.current >= health.max {
+        *heal_progress = 0.0;
+        return;
+    }
+
+    *heal_progress += regen_per_second * time.delta_secs();
+    let heal_amount = heal_progress.floor() as u32;
+    if heal_amount == 0 {
+        return;
+    }
+
+    health.current = (health.current + heal_amount).min(health.max);
+    *heal_progress -= heal_amount as f32;
 }
 
 fn approach_velocity(current: Vec2, target: Vec2, max_delta: f32) -> Vec2 {
@@ -306,5 +363,12 @@ mod tests {
         }
 
         assert!((velocity.length() - constants::PLAYER_SPEED).abs() < 0.01);
+    }
+
+    #[test]
+    fn projectile_spawn_distance_is_past_barrel_tip() {
+        let barrel_tip_distance = constants::PLAYER_RADIUS - BARREL_OVERLAP + BARREL_LENGTH;
+
+        assert!(muzzle_projectile_distance() > barrel_tip_distance);
     }
 }

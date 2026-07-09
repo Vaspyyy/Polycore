@@ -12,6 +12,14 @@ const UPGRADE_MENU_WIDTH: f32 = 268.0;
 const UPGRADE_ROW_WIDTH: f32 = 224.0;
 const UPGRADE_ROW_HEIGHT: f32 = 19.8;
 const UPGRADE_ROW_RADIUS: f32 = UPGRADE_ROW_HEIGHT / 2.0;
+const HEALTH_REGEN_INDEX: usize = 0;
+const MAX_HEALTH_INDEX: usize = 1;
+const BODY_DAMAGE_INDEX: usize = 2;
+const BULLET_SPEED_INDEX: usize = 3;
+const BULLET_PENETRATION_INDEX: usize = 4;
+const BULLET_DAMAGE_INDEX: usize = 5;
+const RELOAD_INDEX: usize = 6;
+const MOVEMENT_SPEED_INDEX: usize = 7;
 const UPGRADE_LABELS: [&str; UPGRADE_COUNT] = [
     "Health Regen",
     "Max Health",
@@ -78,6 +86,38 @@ impl UpgradeState {
         self.points -= 1;
         *level += 1;
         true
+    }
+
+    pub fn health_regen_per_second(&self) -> f32 {
+        self.levels[HEALTH_REGEN_INDEX] as f32 * 1.25
+    }
+
+    pub fn max_health(&self) -> u32 {
+        constants::PLAYER_MAX_HEALTH + self.levels[MAX_HEALTH_INDEX] * 20
+    }
+
+    pub fn body_damage(&self) -> u32 {
+        self.levels[BODY_DAMAGE_INDEX]
+    }
+
+    pub fn bullet_speed(&self) -> f32 {
+        constants::PROJECTILE_SPEED * (1.0 + self.levels[BULLET_SPEED_INDEX] as f32 * 0.08)
+    }
+
+    pub fn bullet_penetration(&self) -> u32 {
+        1 + self.levels[BULLET_PENETRATION_INDEX]
+    }
+
+    pub fn bullet_damage(&self) -> u32 {
+        1 + self.levels[BULLET_DAMAGE_INDEX]
+    }
+
+    pub fn reload_cooldown(&self) -> f32 {
+        constants::SHOOT_COOLDOWN / (1.0 + self.levels[RELOAD_INDEX] as f32 * 0.12)
+    }
+
+    pub fn movement_speed(&self) -> f32 {
+        constants::PLAYER_SPEED * (1.0 + self.levels[MOVEMENT_SPEED_INDEX] as f32 * 0.06)
     }
 }
 
@@ -546,5 +586,27 @@ mod tests {
         assert_eq!(approach_percent(0.0, 12.5, 5.0), 5.0);
         assert_eq!(approach_percent(10.0, 12.5, 5.0), 12.5);
         assert_eq!(approach_percent(20.0, 12.5, 5.0), 15.0);
+    }
+
+    #[test]
+    fn upgrade_effects_scale_from_selected_levels() {
+        let mut upgrades = UpgradeState::default();
+        upgrades.levels[HEALTH_REGEN_INDEX] = 2;
+        upgrades.levels[MAX_HEALTH_INDEX] = 3;
+        upgrades.levels[BODY_DAMAGE_INDEX] = 4;
+        upgrades.levels[BULLET_SPEED_INDEX] = 5;
+        upgrades.levels[BULLET_PENETRATION_INDEX] = 6;
+        upgrades.levels[BULLET_DAMAGE_INDEX] = 7;
+        upgrades.levels[RELOAD_INDEX] = 8;
+        upgrades.levels[MOVEMENT_SPEED_INDEX] = 2;
+
+        assert_eq!(upgrades.health_regen_per_second(), 2.5);
+        assert_eq!(upgrades.max_health(), constants::PLAYER_MAX_HEALTH + 60);
+        assert_eq!(upgrades.body_damage(), 4);
+        assert!(upgrades.bullet_speed() > constants::PROJECTILE_SPEED);
+        assert_eq!(upgrades.bullet_penetration(), 7);
+        assert_eq!(upgrades.bullet_damage(), 8);
+        assert!(upgrades.reload_cooldown() < constants::SHOOT_COOLDOWN);
+        assert!(upgrades.movement_speed() > constants::PLAYER_SPEED);
     }
 }

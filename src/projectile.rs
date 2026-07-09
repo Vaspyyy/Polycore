@@ -1,6 +1,7 @@
 use crate::{
     constants,
-    player::{Player, Velocity},
+    hud::UpgradeState,
+    player::{self, Player, Velocity},
 };
 use bevy::prelude::*;
 
@@ -13,12 +14,19 @@ pub struct Lifetime(pub f32);
 #[derive(Component)]
 pub struct ShootCooldown(pub f32);
 
+#[derive(Component)]
+pub struct ProjectileDamage(pub u32);
+
+#[derive(Component)]
+pub struct ProjectilePenetration(pub u32);
+
 pub fn shoot_projectile(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mouse: Res<ButtonInput<MouseButton>>,
     time: Res<Time>,
+    upgrades: Res<UpgradeState>,
     mut player_query: Query<(&Transform, &mut ShootCooldown), With<Player>>,
 ) {
     let Ok((transform, mut cooldown)) = player_query.single_mut() else {
@@ -34,15 +42,16 @@ pub fn shoot_projectile(
         return;
     }
 
-    cooldown.0 = constants::SHOOT_COOLDOWN;
+    cooldown.0 = upgrades.reload_cooldown();
 
     let direction = transform.rotation * Vec3::Y;
-    let spawn_pos = transform.translation
-        + direction * (constants::PLAYER_RADIUS + constants::PROJECTILE_RADIUS + 4.0);
+    let spawn_pos = transform.translation + direction * player::muzzle_projectile_distance();
 
     commands.spawn((
         Projectile,
         Lifetime(constants::PROJECTILE_LIFETIME),
+        ProjectileDamage(upgrades.bullet_damage()),
+        ProjectilePenetration(upgrades.bullet_penetration()),
         Mesh2d(meshes.add(Circle::new(constants::PROJECTILE_RADIUS))),
         MeshMaterial2d(materials.add(Color::srgba(
             constants::PROJECTILE_COLOR[0],
@@ -51,7 +60,7 @@ pub fn shoot_projectile(
             constants::PROJECTILE_COLOR[3],
         ))),
         Transform::from_translation(spawn_pos),
-        Velocity(direction.xy() * constants::PROJECTILE_SPEED),
+        Velocity(direction.xy() * upgrades.bullet_speed()),
     ));
 }
 

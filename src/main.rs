@@ -71,6 +71,8 @@ fn main() {
             (
                 player::player_aim,
                 player::update_barrel,
+                player::update_player_upgrade_stats,
+                player::regenerate_player_health,
                 player::update_health_bar,
                 shape::update_shape_health_bars,
                 projectile::shoot_projectile,

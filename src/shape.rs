@@ -317,4 +317,12 @@ mod tests {
         assert!(constants::shape_damage(5) > constants::shape_damage(4));
         assert!(constants::shape_damage(6) > constants::shape_damage(5));
     }
+
+    #[test]
+    fn shape_health_uses_requested_tier_scaling() {
+        assert_eq!(constants::shape_health(3), 4);
+        assert_eq!(constants::shape_health(4), 6);
+        assert_eq!(constants::shape_health(5), 8);
+        assert_eq!(constants::shape_health(6), 20);
+    }
 }

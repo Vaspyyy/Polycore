@@ -61,9 +61,14 @@ pub fn arena_half_extent() -> f32 {
     GRID_EXTENT / 2.0
 }
 
-// Shape health/XP: sides - 1 = HP, HP * 5 = XP
+// Shape health/XP: low-tier shapes have doubled HP, hexagons have quadrupled HP.
 pub fn shape_health(sides: u32) -> u32 {
-    (sides - 1).max(1)
+    let base_health = (sides - 1).max(1);
+    if sides == 6 {
+        base_health * 4
+    } else {
+        base_health * 2
+    }
 }
 pub fn shape_xp(sides: u32) -> u32 {
     shape_health(sides) * 5
