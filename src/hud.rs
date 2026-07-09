@@ -1,6 +1,7 @@
 use crate::{
     constants,
     menu::GamePhase,
+    rng::Rng,
     shape::{Level, TotalXp, Xp},
 };
 use bevy::prelude::*;
@@ -86,6 +87,27 @@ impl UpgradeState {
         self.points -= 1;
         *level += 1;
         true
+    }
+
+    pub fn spend_random_point(&mut self, rng: &mut Rng) -> bool {
+        if self.points == 0 {
+            return false;
+        }
+
+        let mut options = [0; UPGRADE_COUNT];
+        let mut option_count = 0;
+        for (index, level) in self.levels.iter().enumerate() {
+            if *level < UPGRADE_MAX_LEVEL {
+                options[option_count] = index;
+                option_count += 1;
+            }
+        }
+        if option_count == 0 {
+            return false;
+        }
+
+        let option_index = rng.next(option_count as u32) as usize;
+        self.spend_point(options[option_index])
     }
 
     pub fn health_regen_per_second(&self) -> f32 {
