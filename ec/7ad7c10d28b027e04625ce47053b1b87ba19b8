@@ -1,0 +1,26 @@
+src/constants.rs
+  s_5979e6aa95d585::t_36b94929afa615 59-60
+  s_5979e6aa95d585::t_4af4fe8562e6f3 53
+  s_5979e6aa95d585::t_6e52b4e8326855 54
+src/player.rs
+  s_5979e6aa95d585::t_a158289e796413 82-86,89-117,119-123,125-126
+  s_5979e6aa95d585::t_10bb8cd740b082 118,124,127
+src/shape.rs
+  s_5979e6aa95d585::t_54515f8d5c7b42 122-127,144-151,258-266
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "ec7ad7c10d28b027e04625ce47053b1b87ba19b8",
+  "prompts": {},
+  "sessions": {
+    "s_5979e6aa95d585": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d1a-694c-7d02-b600-ac584335f385",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
