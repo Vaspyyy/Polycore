@@ -1,0 +1,44 @@
+src/main.rs
+  s_5979e6aa95d585::t_95dfce2c272a84 74-75
+src/hud.rs
+  s_5979e6aa95d585::t_39567d6dd612cd 15-22,90-120
+  s_5979e6aa95d585::t_a8a94ec1c94061 121,590-611
+src/shape.rs
+  s_5979e6aa95d585::t_6a94f7f2a339ea 320-327
+src/collision.rs
+  s_5979e6aa95d585::t_448157b50a3ec3 3,6,16-24,41-48,54,57,59,64-66
+  s_5979e6aa95d585::t_79e23368f09b00 75,78-80,93-102,115,117-127,164-176
+  s_5979e6aa95d585::t_207129ad0a32f6 67-68
+  s_5979e6aa95d585::t_1a72eb9422d824 177
+src/constants.rs
+  s_5979e6aa95d585::t_e7e7ad67f566a7 64,66-71
+src/menu.rs
+  s_5979e6aa95d585::t_55c1f4511b4e7e 1,905
+src/player.rs
+  s_5979e6aa95d585::t_8801e78460d073 73-76,367-369,371-372
+  s_5979e6aa95d585::t_ba7dcf03c456c7 370
+  s_5979e6aa95d585::t_f4c86c3729afae 1,153,186-188,201-250,373
+  s_5979e6aa95d585::t_4059c2e7ef9113 31-32
+  s_5979e6aa95d585::t_0838887d394aff 251
+src/projectile.rs
+  s_5979e6aa95d585::t_cfa8c163b3c781 48
+  s_5979e6aa95d585::t_30d176bd6174b1 4
+  s_5979e6aa95d585::t_1ecc044bc86ae0 17-22,29,45,53-54,63
+  s_5979e6aa95d585::t_b963921849f317 3
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "22a2e755f6967ccbd083a52b5e436555111ecd09",
+  "prompts": {},
+  "sessions": {
+    "s_5979e6aa95d585": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3d1a-694c-7d02-b600-ac584335f385",
+        "model": "gpt-5.5"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
