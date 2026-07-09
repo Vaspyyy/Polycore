@@ -79,26 +79,51 @@ pub fn setup_player(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
 ) {
-    commands.spawn((
-        Player,
-        PlayerHealth {
-            current: constants::PLAYER_MAX_HEALTH,
-            max: constants::PLAYER_MAX_HEALTH,
-        },
-        DamageCooldown(0.0),
-        Velocity::default(),
-        MoveVelocity::default(),
-        ShootCooldown(0.0),
-        Mesh2d(meshes.add(Circle::new(constants::PLAYER_RADIUS))),
-        MeshMaterial2d(materials.add(Color::srgba(
-            constants::PLAYER_COLOR[0],
-            constants::PLAYER_COLOR[1],
-            constants::PLAYER_COLOR[2],
-            constants::PLAYER_COLOR[3],
-        ))),
-        Transform::from_xyz(0.0, 0.0, 0.0),
-        Visibility::Hidden,
+    let outline_material = materials.add(Color::srgba(
+        constants::OUTLINE_COLOR[0],
+        constants::OUTLINE_COLOR[1],
+        constants::OUTLINE_COLOR[2],
+        constants::OUTLINE_COLOR[3],
     ));
+
+    commands
+        .spawn((
+            Player,
+            PlayerHealth {
+                current: constants::PLAYER_MAX_HEALTH,
+                max: constants::PLAYER_MAX_HEALTH,
+            },
+            DamageCooldown(0.0),
+            Velocity::default(),
+            MoveVelocity::default(),
+            ShootCooldown(0.0),
+            Mesh2d(meshes.add(Circle::new(constants::PLAYER_RADIUS))),
+            MeshMaterial2d(materials.add(Color::srgba(
+                constants::PLAYER_COLOR[0],
+                constants::PLAYER_COLOR[1],
+                constants::PLAYER_COLOR[2],
+                constants::PLAYER_COLOR[3],
+            ))),
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            Visibility::Hidden,
+        ))
+        .with_children(|player| {
+            player.spawn((
+                Mesh2d(meshes.add(Circle::new(
+                    constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
+                ))),
+                MeshMaterial2d(outline_material.clone()),
+                Transform::from_xyz(0.0, 0.0, -0.2),
+            ));
+            player.spawn((
+                Mesh2d(meshes.add(Rectangle::new(
+                    BARREL_WIDTH + constants::OUTLINE_THICKNESS * 2.0,
+                    BARREL_LENGTH + constants::OUTLINE_THICKNESS * 2.0,
+                ))),
+                MeshMaterial2d(outline_material),
+                Transform::from_xyz(0.0, barrel_center_distance(), -0.2),
+            ));
+        });
 
     // Turret barrel (rectangle indicating aim direction)
     commands.spawn((

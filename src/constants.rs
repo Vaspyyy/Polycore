@@ -50,12 +50,14 @@ pub const XP_PER_LEVEL: u32 = 100;
 pub const PROJECTILE_COLOR: [f32; 4] = [1.0, 0.8, 0.2, 1.0];
 pub const ENEMY_COLOR: [f32; 4] = [0.9, 0.2, 0.2, 1.0];
 pub const BARREL_COLOR: [f32; 4] = [0.4, 0.4, 0.4, 1.0];
-pub const BG_COLOR: [f32; 4] = [0.05, 0.05, 0.08, 1.0];
-pub const GRID_COLOR: [f32; 4] = [0.1, 0.1, 0.15, 1.0];
+pub const BG_COLOR: [f32; 4] = [0.065, 0.065, 0.095, 1.0];
+pub const GRID_COLOR: [f32; 4] = [0.115, 0.115, 0.165, 1.0];
 pub const BORDER_COLOR: [f32; 4] = [0.35, 0.38, 0.46, 1.0];
 pub const GRID_SPACING: f32 = 64.0;
 pub const GRID_EXTENT: f32 = 2000.0;
 pub const BORDER_THICKNESS: f32 = 8.0;
+pub const OUTLINE_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
+pub const OUTLINE_THICKNESS: f32 = 3.0;
 
 pub fn arena_half_extent() -> f32 {
     GRID_EXTENT / 2.0

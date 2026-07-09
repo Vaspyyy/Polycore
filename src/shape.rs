@@ -119,6 +119,12 @@ pub fn shape_spawn(
         constants::HEALTH_BAR_FILL_COLOR[2],
         constants::HEALTH_BAR_FILL_COLOR[3],
     ));
+    let outline_material = materials.add(Color::srgba(
+        constants::OUTLINE_COLOR[0],
+        constants::OUTLINE_COLOR[1],
+        constants::OUTLINE_COLOR[2],
+        constants::OUTLINE_COLOR[3],
+    ));
 
     commands
         .spawn((
@@ -135,6 +141,14 @@ pub fn shape_spawn(
             Transform::from_xyz(spawn_pos.x, spawn_pos.y, 0.0),
         ))
         .with_children(|shape| {
+            shape.spawn((
+                Mesh2d(meshes.add(RegularPolygon::new(
+                    constants::SHAPE_RADIUS + constants::OUTLINE_THICKNESS,
+                    sides,
+                ))),
+                MeshMaterial2d(outline_material),
+                Transform::from_xyz(0.0, 0.0, -0.2),
+            ));
             shape.spawn((
                 ShapeHealthBarBack,
                 Mesh2d(health_bar_back_mesh),
@@ -241,12 +255,15 @@ pub fn shape_knockback_update(
 
 pub fn update_shape_health_bars(
     shapes: Query<(&Health, &MaxHealth, &Children), With<Shape>>,
-    mut bars: Query<(
-        &mut Transform,
-        &mut Visibility,
-        Option<&ShapeHealthBarBack>,
-        Option<&ShapeHealthBarFill>,
-    )>,
+    mut bars: Query<
+        (
+            &mut Transform,
+            &mut Visibility,
+            Option<&ShapeHealthBarBack>,
+            Option<&ShapeHealthBarFill>,
+        ),
+        Or<(With<ShapeHealthBarBack>, With<ShapeHealthBarFill>)>,
+    >,
 ) {
     for (health, max_health, children) in shapes.iter() {
         let is_damaged = health.0 < max_health.0;
