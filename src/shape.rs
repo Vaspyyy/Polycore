@@ -1,4 +1,10 @@
-use crate::{constants, hud::UpgradeState, player::Player, rng::Rng};
+use crate::{
+    constants,
+    enemy_bot::{EnemyBot, EnemyBotHealth},
+    hud::UpgradeState,
+    player::Player,
+    rng::Rng,
+};
 use bevy::prelude::*;
 
 #[derive(Component)]
@@ -73,6 +79,7 @@ pub fn shape_spawn(
     mut timer: ResMut<SpawnTimer>,
     shapes: Query<(), With<Shape>>,
     player: Query<&Transform, With<Player>>,
+    bots: Query<(&Transform, &EnemyBotHealth), With<EnemyBot>>,
 ) {
     timer.0 -= time.delta_secs();
     if timer.0 > 0.0 {
@@ -86,7 +93,8 @@ pub fn shape_spawn(
     let Ok(player_transform) = player.single() else {
         return;
     };
-    let spawn_pos = random_spawn_position(player_transform.translation.xy(), &mut rng);
+    let spawn_center = random_spawn_center(player_transform.translation.xy(), &bots, &mut rng);
+    let spawn_pos = random_spawn_position(spawn_center, &mut rng);
 
     let sides = 3 + rng.next(4) as u32;
     let hp = constants::shape_health(sides);
@@ -211,6 +219,24 @@ fn random_spawn_position(player_pos: Vec2, rng: &mut Rng) -> Vec2 {
         player_pos.x.clamp(-half, half),
         player_pos.y.clamp(-half, half),
     )
+}
+
+fn random_spawn_center(
+    player_pos: Vec2,
+    bots: &Query<(&Transform, &EnemyBotHealth), With<EnemyBot>>,
+    rng: &mut Rng,
+) -> Vec2 {
+    let live_bot_count = bots.iter().filter(|(_, health)| health.current > 0).count();
+    let center_index = rng.next((live_bot_count + 1) as u32) as usize;
+    if center_index == 0 {
+        return player_pos;
+    }
+
+    bots.iter()
+        .filter(|(_, health)| health.current > 0)
+        .nth(center_index - 1)
+        .map(|(transform, _)| transform.translation.xy())
+        .unwrap_or(player_pos)
 }
 
 fn rng_offset(rng: &mut Rng, range: f32) -> f32 {

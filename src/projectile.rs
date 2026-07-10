@@ -10,6 +10,12 @@ use bevy::prelude::*;
 #[derive(Component)]
 pub struct Projectile;
 
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectileOwner {
+    Player,
+    EnemyBot(Entity),
+}
+
 #[derive(Component)]
 pub struct Lifetime(pub f32);
 
@@ -83,6 +89,7 @@ pub fn shoot_projectile(
 
         commands.spawn((
             Projectile,
+            ProjectileOwner::Player,
             Lifetime(lifetime),
             ProjectileDamage(damage),
             ProjectilePenetration(upgrades.bullet_penetration()),

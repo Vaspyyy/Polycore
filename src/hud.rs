@@ -1,6 +1,7 @@
 use crate::{
     constants,
     menu::GamePhase,
+    rng::Rng,
     shape::{Level, TotalXp, Xp},
 };
 use bevy::prelude::*;
@@ -51,6 +52,20 @@ const UPGRADE_KEYS: [KeyCode; UPGRADE_COUNT] = [
     KeyCode::Digit8,
 ];
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(usize)]
+pub enum UpgradeKind {
+    HealthRegen = HEALTH_REGEN_INDEX,
+    MaxHealth = MAX_HEALTH_INDEX,
+    MovementSpeed = MOVEMENT_SPEED_INDEX,
+}
+
+impl UpgradeKind {
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+}
+
 #[derive(Resource, Clone)]
 pub struct UpgradeState {
     pub points: u32,
@@ -86,6 +101,66 @@ impl UpgradeState {
         self.points -= 1;
         *level += 1;
         true
+    }
+
+    pub fn spend_point_on(&mut self, kind: UpgradeKind) -> bool {
+        self.spend_point(kind.index())
+    }
+
+    pub fn level_of(&self, kind: UpgradeKind) -> u32 {
+        self.levels[kind.index()]
+    }
+
+    pub fn spend_random_point(&mut self, rng: &mut Rng) -> bool {
+        if self.points == 0 {
+            return false;
+        }
+
+        let mut options = [0; UPGRADE_COUNT];
+        let mut option_count = 0;
+        for (index, level) in self.levels.iter().enumerate() {
+            if *level < UPGRADE_MAX_LEVEL {
+                options[option_count] = index;
+                option_count += 1;
+            }
+        }
+        if option_count == 0 {
+            return false;
+        }
+
+        let option_index = rng.next(option_count as u32) as usize;
+        self.spend_point(options[option_index])
+    }
+
+    pub fn spend_weighted_point(&mut self, rng: &mut Rng, weights: &[u32]) -> bool {
+        if self.points == 0 {
+            return false;
+        }
+
+        let total_weight: u32 = self
+            .levels
+            .iter()
+            .enumerate()
+            .filter(|(_, level)| **level < UPGRADE_MAX_LEVEL)
+            .map(|(index, _)| weights.get(index).copied().unwrap_or(1))
+            .sum();
+        if total_weight == 0 {
+            return self.spend_random_point(rng);
+        }
+
+        let mut roll = rng.next(total_weight);
+        for (index, level) in self.levels.iter().enumerate() {
+            if *level >= UPGRADE_MAX_LEVEL {
+                continue;
+            }
+            let weight = weights.get(index).copied().unwrap_or(1);
+            if roll < weight {
+                return self.spend_point(index);
+            }
+            roll -= weight;
+        }
+
+        false
     }
 
     pub fn health_regen_per_second(&self) -> f32 {

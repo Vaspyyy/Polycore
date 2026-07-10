@@ -1,4 +1,4 @@
-use crate::{constants, evolution, hud, player, projectile, shape};
+use crate::{combat, constants, enemy_bot, evolution, hud, player, projectile, shape};
 use bevy::{
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
@@ -798,6 +798,7 @@ pub fn handle_death_buttons(
     mut spawn_timer: ResMut<shape::SpawnTimer>,
     mut upgrades: ResMut<hud::UpgradeState>,
     mut evolutions: ResMut<evolution::EvolutionState>,
+    mut bot_reset_pending: ResMut<enemy_bot::EnemyBotResetPending>,
     mut buttons: Query<
         (
             &Interaction,
@@ -816,6 +817,7 @@ pub fn handle_death_buttons(
             &mut player::DamageCooldown,
             &mut player::Velocity,
             &mut player::MoveVelocity,
+            &mut combat::CombatStats,
         ),
         With<player::Player>,
     >,
@@ -827,6 +829,7 @@ pub fn handle_death_buttons(
 
         match *interaction {
             Interaction::Pressed => {
+                let full_world_reset = continue_button.is_some();
                 reset_run(
                     &mut commands,
                     &mut run_stats,
@@ -839,10 +842,13 @@ pub fn handle_death_buttons(
                     &shapes,
                     &projectiles,
                     &mut player_query,
+                    full_world_reset,
                 );
                 if retry.is_some() {
+                    bot_reset_pending.0 = false;
                     *phase = GamePhase::Playing;
                 } else {
+                    bot_reset_pending.0 = true;
                     *phase = GamePhase::Menu;
                 }
             }
@@ -882,27 +888,37 @@ fn reset_run(
             &mut player::DamageCooldown,
             &mut player::Velocity,
             &mut player::MoveVelocity,
+            &mut combat::CombatStats,
         ),
         With<player::Player>,
     >,
+    full_world_reset: bool,
 ) {
-    for entity in shapes.iter() {
-        commands.entity(entity).despawn();
-    }
-    for entity in projectiles.iter() {
-        commands.entity(entity).despawn();
+    if full_world_reset {
+        for entity in shapes.iter() {
+            commands.entity(entity).despawn();
+        }
+        for entity in projectiles.iter() {
+            commands.entity(entity).despawn();
+        }
+        spawn_timer.0 = 0.0;
     }
 
     run_stats.time_alive = 0.0;
     xp.0 = 0;
     total_xp.0 = 0;
     level.0 = 1;
-    spawn_timer.0 = 0.0;
     upgrades.reset();
     evolutions.reset();
 
-    if let Ok((mut transform, mut health, mut damage_cooldown, mut velocity, mut move_velocity)) =
-        player_query.single_mut()
+    if let Ok((
+        mut transform,
+        mut health,
+        mut damage_cooldown,
+        mut velocity,
+        mut move_velocity,
+        mut combat_stats,
+    )) = player_query.single_mut()
     {
         transform.translation = Vec3::ZERO;
         transform.rotation = Quat::IDENTITY;
@@ -911,6 +927,7 @@ fn reset_run(
         damage_cooldown.0 = 0.0;
         velocity.0 = Vec2::ZERO;
         move_velocity.0 = Vec2::ZERO;
+        *combat_stats = combat::CombatStats::default();
     }
 }
 

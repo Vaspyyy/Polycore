@@ -1,4 +1,5 @@
 use crate::{
+    combat::CombatStats,
     constants,
     evolution::{self, BarrelSpec, EvolutionState},
     hud::UpgradeState,
@@ -135,6 +136,7 @@ pub fn setup_player(
             DamageCooldown(0.0),
             Velocity::default(),
             MoveVelocity::default(),
+            CombatStats::default(),
             ShootCooldown(0.0),
             Mesh2d(meshes.add(Circle::new(constants::PLAYER_RADIUS))),
             MeshMaterial2d(materials.add(Color::srgba(

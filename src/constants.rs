@@ -5,7 +5,7 @@ pub const WINDOW_TITLE: &str = "Polycore";
 
 // Player
 pub const PLAYER_RADIUS: f32 = 20.0;
-pub const PLAYER_MAX_HEALTH: u32 = 100;
+pub const PLAYER_MAX_HEALTH: u32 = 50;
 pub const PLAYER_SPEED: f32 = 300.0;
 pub const PLAYER_ACCEL_TIME: f32 = 1.0;
 pub const PLAYER_COLLISION_KNOCKBACK_SPEED: f32 = 420.0;
@@ -14,10 +14,16 @@ pub const PLAYER_DAMAGE_COOLDOWN: f32 = 0.45;
 pub const PLAYER_COLOR: [f32; 4] = [0.2, 0.6, 1.0, 1.0];
 
 // Shooting
-pub const SHOOT_COOLDOWN: f32 = 0.3;
+pub const SHOOT_COOLDOWN: f32 = 0.6;
 pub const PROJECTILE_RADIUS: f32 = 4.0;
-pub const PROJECTILE_SPEED: f32 = 600.0;
+pub const PROJECTILE_SPEED: f32 = 400.0;
 pub const PROJECTILE_LIFETIME: f32 = 2.0;
+
+// Camera zoom
+pub const CAMERA_MIN_ZOOM: f32 = 0.55;
+pub const CAMERA_SOFT_MAX_ZOOM: f32 = 1.55;
+pub const CAMERA_MAX_ZOOM: f32 = 2.25;
+pub const CAMERA_ZOOM_SPEED: f32 = 0.14;
 
 // Shapes (XP polygons)
 pub const SHAPE_RADIUS: f32 = 25.0;
@@ -54,7 +60,7 @@ pub const BG_COLOR: [f32; 4] = [0.065, 0.065, 0.095, 1.0];
 pub const GRID_COLOR: [f32; 4] = [0.115, 0.115, 0.165, 1.0];
 pub const BORDER_COLOR: [f32; 4] = [0.35, 0.38, 0.46, 1.0];
 pub const GRID_SPACING: f32 = 64.0;
-pub const GRID_EXTENT: f32 = 2000.0;
+pub const GRID_EXTENT: f32 = 4000.0;
 pub const BORDER_THICKNESS: f32 = 8.0;
 pub const OUTLINE_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 pub const OUTLINE_THICKNESS: f32 = 3.0;

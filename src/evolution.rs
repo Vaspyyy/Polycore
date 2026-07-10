@@ -126,6 +126,34 @@ impl EvolutionState {
         Some(option)
     }
 
+    pub fn choose_kind_for_level(&mut self, level: u32, kind: EvolutionKind) -> bool {
+        self.queue_reached_levels(level);
+        let Some(active_level) = self.active_level() else {
+            return false;
+        };
+        let Some(slot) = options_for_level(active_level)
+            .and_then(|options| options.iter().position(|option| option.kind == kind))
+        else {
+            return false;
+        };
+
+        self.choose_active(slot).is_some()
+    }
+
+    pub fn body_scale(&self) -> f32 {
+        match self.current_kind {
+            EvolutionKind::Cannon => 1.04,
+            EvolutionKind::Sniper => 0.92,
+            EvolutionKind::Sprayer => 0.96,
+            EvolutionKind::Guard => 0.88,
+            EvolutionKind::Flanker => 0.95,
+            EvolutionKind::Tank
+            | EvolutionKind::Gunner
+            | EvolutionKind::TwinBarrel
+            | EvolutionKind::RamCore => 1.0,
+        }
+    }
+
     pub fn barrel_specs(&self) -> &'static [BarrelSpec] {
         match self.current_kind {
             EvolutionKind::Tank => &TANK_BARRELS,
