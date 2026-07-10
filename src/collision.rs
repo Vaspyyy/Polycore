@@ -1,9 +1,11 @@
 use crate::{
+    combat::{CombatDeathQueue, CombatStats, CombatantId},
     constants,
     enemy_bot::{
-        EnemyBot, EnemyBotDamageCooldown, EnemyBotEvolution, EnemyBotHealth, EnemyBotLevel,
-        EnemyBotName, EnemyBotUpgrades, EnemyBotVelocity, EnemyBotXp, apply_enemy_bot_damage,
-        award_enemy_bot_xp,
+        EnemyBot, EnemyBotBrain, EnemyBotDamageCooldown, EnemyBotEvolution, EnemyBotHealth,
+        EnemyBotLevel, EnemyBotName, EnemyBotPlaystyle, EnemyBotRespawnTimer, EnemyBotUpgrades,
+        EnemyBotVelocity, EnemyBotXp, apply_enemy_bot_damage, award_enemy_bot_xp,
+        finish_enemy_bot_death,
     },
     evolution::EvolutionState,
     hud::UpgradeState,
@@ -50,8 +52,10 @@ pub fn check_collisions(
         &mut EnemyBotXp,
         &mut EnemyBotLevel,
         &mut EnemyBotUpgrades,
-        &EnemyBotEvolution,
+        &mut EnemyBotEvolution,
         &mut EnemyBotHealth,
+        &EnemyBotPlaystyle,
+        &mut CombatStats,
     )>,
 ) {
     let collision_dist = constants::PROJECTILE_RADIUS + constants::SHAPE_RADIUS;
@@ -95,8 +99,10 @@ pub fn check_collisions(
                                 mut bot_xp,
                                 mut bot_level,
                                 mut bot_upgrades,
-                                bot_evolution,
+                                mut bot_evolution,
                                 mut bot_health,
+                                playstyle,
+                                mut stats,
                             )) = bot_progress.get_mut(bot_entity)
                             {
                                 award_enemy_bot_xp(
@@ -104,8 +110,10 @@ pub fn check_collisions(
                                     &mut bot_xp,
                                     &mut bot_level,
                                     &mut bot_upgrades,
-                                    bot_evolution,
+                                    &mut bot_evolution,
                                     &mut bot_health,
+                                    playstyle,
+                                    &mut stats,
                                     &mut rng,
                                 );
                             }
@@ -124,6 +132,8 @@ pub fn check_collisions(
 
 pub fn check_projectile_enemy_bot_collisions(
     mut commands: Commands,
+    mut deaths: ResMut<CombatDeathQueue>,
+    player_entity: Query<Entity, With<Player>>,
     mut projectiles: Query<
         (
             Entity,
@@ -142,6 +152,8 @@ pub fn check_projectile_enemy_bot_collisions(
             &mut EnemyBotHealth,
             &mut EnemyBotVelocity,
             &mut Visibility,
+            &mut EnemyBotRespawnTimer,
+            &mut EnemyBotBrain,
         ),
         With<EnemyBot>,
     >,
@@ -164,7 +176,15 @@ pub fn check_projectile_enemy_bot_collisions(
         }
 
         let proj_pos = proj_transform.translation.xy();
-        for (bot_entity, bot_transform, mut health, mut velocity, mut visibility) in bots.iter_mut()
+        for (
+            bot_entity,
+            bot_transform,
+            mut health,
+            mut velocity,
+            mut visibility,
+            mut respawn_timer,
+            mut brain,
+        ) in bots.iter_mut()
         {
             if health.current == 0 {
                 continue;
@@ -177,12 +197,29 @@ pub fn check_projectile_enemy_bot_collisions(
 
             let dist_sq = proj_pos.distance_squared(bot_transform.translation.xy());
             if dist_sq < collision_dist_sq {
+                let (attacker, killer) = match *projectile_owner {
+                    ProjectileOwner::Player => {
+                        (player_entity.single().ok(), Some(CombatantId::Player))
+                    }
+                    ProjectileOwner::EnemyBot(owner) => {
+                        (Some(owner), Some(CombatantId::EnemyBot(owner)))
+                    }
+                };
+                if let Some(attacker) = attacker {
+                    brain.note_attacker(attacker);
+                }
                 let knockback_dir = (bot_transform.translation.xy() - proj_pos).normalize_or_zero();
                 velocity.0 += knockback_dir
                     * constants::PLAYER_COLLISION_KNOCKBACK_SPEED
                     * projectile_knockback.0;
                 if apply_enemy_bot_damage(&mut health, projectile_damage.0) {
-                    *visibility = Visibility::Hidden;
+                    finish_enemy_bot_death(
+                        bot_entity,
+                        &mut visibility,
+                        &mut respawn_timer,
+                        &mut deaths,
+                        killer,
+                    );
                 }
                 penetration.0 = penetration.0.saturating_sub(1);
                 if penetration.0 == 0 {
@@ -197,6 +234,7 @@ pub fn check_projectile_enemy_bot_collisions(
 pub fn check_projectile_player_collisions(
     mut commands: Commands,
     mut phase: ResMut<GamePhase>,
+    mut deaths: ResMut<CombatDeathQueue>,
     run_stats: Res<RunStats>,
     total_xp: Res<TotalXp>,
     level: Res<crate::shape::Level>,
@@ -222,6 +260,9 @@ pub fn check_projectile_player_collisions(
     let Ok((player_transform, mut player_velocity, mut player_health)) = player.single_mut() else {
         return;
     };
+    if player_health.current == 0 {
+        return;
+    }
     let collision_dist = constants::PROJECTILE_RADIUS + constants::PLAYER_RADIUS;
     let collision_dist_sq = collision_dist * collision_dist;
     let player_pos = player_transform.translation.xy();
@@ -251,13 +292,13 @@ pub fn check_projectile_player_collisions(
         let knockback_dir = (player_pos - proj_pos).normalize_or_zero();
         player_velocity.0 +=
             knockback_dir * constants::PLAYER_COLLISION_KNOCKBACK_SPEED * projectile_knockback.0;
-        player_health.current = player_health.current.saturating_sub(projectile_damage.0);
+        let was_killed = apply_player_damage(&mut player_health, projectile_damage.0);
         penetration.0 = penetration.0.saturating_sub(1);
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
         }
 
-        if player_health.current == 0 {
+        if was_killed {
             death_summary.killed_by = bot_names
                 .get(owner)
                 .map(|name| name.0.clone())
@@ -266,6 +307,7 @@ pub fn check_projectile_player_collisions(
             death_summary.level = level.0;
             death_summary.time_alive = run_stats.time_alive;
             death_summary.tank_name = evolution.current_name.clone();
+            deaths.record(CombatantId::Player, Some(CombatantId::EnemyBot(owner)));
             *phase = GamePhase::Dead;
             break;
         }
@@ -275,6 +317,7 @@ pub fn check_projectile_player_collisions(
 pub fn check_player_shape_collisions(
     mut commands: Commands,
     mut phase: ResMut<GamePhase>,
+    mut deaths: ResMut<CombatDeathQueue>,
     run_stats: Res<RunStats>,
     upgrades: Res<UpgradeState>,
     evolution: Res<EvolutionState>,
@@ -378,14 +421,15 @@ pub fn check_player_shape_collisions(
         }
 
         if damage_cooldown.0 <= 0.0 {
-            player_health.current = player_health.current.saturating_sub(shape_damage.0);
+            let was_killed = apply_player_damage(&mut player_health, shape_damage.0);
             damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
-            if player_health.current == 0 {
+            if was_killed {
                 death_summary.killed_by = shape_kind.name().to_string();
                 death_summary.score = total_xp.0;
                 death_summary.level = level.0;
                 death_summary.time_alive = run_stats.time_alive;
                 death_summary.tank_name = evolution.current_name.clone();
+                deaths.record(CombatantId::Player, None);
                 *phase = GamePhase::Dead;
                 break;
             }
@@ -395,6 +439,7 @@ pub fn check_player_shape_collisions(
 
 pub fn check_player_enemy_bot_collisions(
     mut phase: ResMut<GamePhase>,
+    mut deaths: ResMut<CombatDeathQueue>,
     run_stats: Res<RunStats>,
     upgrades: Res<UpgradeState>,
     evolution: Res<EvolutionState>,
@@ -403,6 +448,7 @@ pub fn check_player_enemy_bot_collisions(
     mut death_summary: ResMut<DeathSummary>,
     mut player: Query<
         (
+            Entity,
             &mut Transform,
             &mut Velocity,
             &mut PlayerHealth,
@@ -412,6 +458,7 @@ pub fn check_player_enemy_bot_collisions(
     >,
     mut bots: Query<
         (
+            Entity,
             &mut Transform,
             &mut EnemyBotVelocity,
             &mut EnemyBotHealth,
@@ -420,12 +467,19 @@ pub fn check_player_enemy_bot_collisions(
             &EnemyBotUpgrades,
             &EnemyBotEvolution,
             &mut Visibility,
+            &mut EnemyBotRespawnTimer,
+            &mut EnemyBotBrain,
         ),
         (With<EnemyBot>, Without<Player>),
     >,
 ) {
-    let Ok((mut player_transform, mut player_velocity, mut player_health, mut damage_cooldown)) =
-        player.single_mut()
+    let Ok((
+        player_entity,
+        mut player_transform,
+        mut player_velocity,
+        mut player_health,
+        mut damage_cooldown,
+    )) = player.single_mut()
     else {
         return;
     };
@@ -435,6 +489,7 @@ pub fn check_player_enemy_bot_collisions(
     let body_damage = upgrades.body_damage() + evolution.body_damage_bonus();
 
     for (
+        bot_entity,
         mut bot_transform,
         mut bot_velocity,
         mut bot_health,
@@ -443,6 +498,8 @@ pub fn check_player_enemy_bot_collisions(
         bot_upgrades,
         bot_evolution,
         mut bot_visibility,
+        mut bot_respawn_timer,
+        mut bot_brain,
     ) in bots.iter_mut()
     {
         if bot_health.current == 0 {
@@ -478,8 +535,15 @@ pub fn check_player_enemy_bot_collisions(
         bot_velocity.0 -= normal * constants::PLAYER_COLLISION_KNOCKBACK_SPEED;
 
         if body_damage > 0 && bot_damage_cooldown.0 <= 0.0 {
+            bot_brain.note_attacker(player_entity);
             if apply_enemy_bot_damage(&mut bot_health, body_damage) {
-                *bot_visibility = Visibility::Hidden;
+                finish_enemy_bot_death(
+                    bot_entity,
+                    &mut bot_visibility,
+                    &mut bot_respawn_timer,
+                    &mut deaths,
+                    Some(CombatantId::Player),
+                );
             }
             bot_damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
         }
@@ -488,14 +552,15 @@ pub fn check_player_enemy_bot_collisions(
             let bot_body_damage = constants::shape_damage(4)
                 + bot_upgrades.0.body_damage()
                 + bot_evolution.0.body_damage_bonus();
-            player_health.current = player_health.current.saturating_sub(bot_body_damage);
+            let was_killed = apply_player_damage(&mut player_health, bot_body_damage);
             damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
-            if player_health.current == 0 {
+            if was_killed {
                 death_summary.killed_by = bot_name.0.clone();
                 death_summary.score = total_xp.0;
                 death_summary.level = level.0;
                 death_summary.time_alive = run_stats.time_alive;
                 death_summary.tank_name = evolution.current_name.clone();
+                deaths.record(CombatantId::Player, Some(CombatantId::EnemyBot(bot_entity)));
                 *phase = GamePhase::Dead;
                 break;
             }
@@ -506,17 +571,22 @@ pub fn check_player_enemy_bot_collisions(
 pub fn check_enemy_bot_shape_collisions(
     mut commands: Commands,
     mut rng: ResMut<Rng>,
+    mut deaths: ResMut<CombatDeathQueue>,
     mut bots: Query<
         (
+            Entity,
             &mut Transform,
             &mut EnemyBotVelocity,
             &mut EnemyBotHealth,
             &mut EnemyBotDamageCooldown,
             &mut EnemyBotUpgrades,
-            &EnemyBotEvolution,
+            &mut EnemyBotEvolution,
             &mut EnemyBotXp,
             &mut EnemyBotLevel,
             &mut Visibility,
+            &EnemyBotPlaystyle,
+            &mut CombatStats,
+            &mut EnemyBotRespawnTimer,
         ),
         (With<EnemyBot>, Without<Shape>),
     >,
@@ -539,15 +609,19 @@ pub fn check_enemy_bot_shape_collisions(
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
 
     for (
+        bot_entity,
         mut bot_transform,
         mut bot_velocity,
         mut bot_health,
         mut damage_cooldown,
         mut bot_upgrades,
-        bot_evolution,
+        mut bot_evolution,
         mut bot_xp,
         mut bot_level,
         mut visibility,
+        playstyle,
+        mut stats,
+        mut respawn_timer,
     ) in bots.iter_mut()
     {
         if bot_health.current == 0 {
@@ -608,8 +682,10 @@ pub fn check_enemy_bot_shape_collisions(
                         &mut bot_xp,
                         &mut bot_level,
                         &mut bot_upgrades,
-                        bot_evolution,
+                        &mut bot_evolution,
                         &mut bot_health,
+                        playstyle,
+                        &mut stats,
                         &mut rng,
                     );
                 }
@@ -618,7 +694,13 @@ pub fn check_enemy_bot_shape_collisions(
 
             if damage_cooldown.0 <= 0.0 {
                 if apply_enemy_bot_damage(&mut bot_health, shape_damage.0) {
-                    *visibility = Visibility::Hidden;
+                    finish_enemy_bot_death(
+                        bot_entity,
+                        &mut visibility,
+                        &mut respawn_timer,
+                        &mut deaths,
+                        None,
+                    );
                     break;
                 }
                 damage_cooldown.0 = constants::PLAYER_DAMAGE_COOLDOWN;
@@ -628,7 +710,22 @@ pub fn check_enemy_bot_shape_collisions(
 }
 
 pub fn check_enemy_bot_enemy_bot_collisions(
-    mut bots: Query<(&mut Transform, &mut EnemyBotVelocity, &EnemyBotHealth), With<EnemyBot>>,
+    mut deaths: ResMut<CombatDeathQueue>,
+    mut bots: Query<
+        (
+            Entity,
+            &mut Transform,
+            &mut EnemyBotVelocity,
+            &mut EnemyBotHealth,
+            &mut EnemyBotDamageCooldown,
+            &EnemyBotUpgrades,
+            &EnemyBotEvolution,
+            &mut Visibility,
+            &mut EnemyBotRespawnTimer,
+            &mut EnemyBotBrain,
+        ),
+        With<EnemyBot>,
+    >,
 ) {
     let collision_distance = constants::PLAYER_RADIUS * 2.0;
     let collision_distance_sq = collision_distance * collision_distance;
@@ -639,8 +736,30 @@ pub fn check_enemy_bot_enemy_bot_collisions(
     let mut combinations = bots.iter_combinations_mut::<2>();
     while let Some(
         [
-            (mut transform_a, mut velocity_a, health_a),
-            (mut transform_b, mut velocity_b, health_b),
+            (
+                entity_a,
+                mut transform_a,
+                mut velocity_a,
+                mut health_a,
+                mut cooldown_a,
+                upgrades_a,
+                evolution_a,
+                mut visibility_a,
+                mut respawn_a,
+                mut brain_a,
+            ),
+            (
+                entity_b,
+                mut transform_b,
+                mut velocity_b,
+                mut health_b,
+                mut cooldown_b,
+                upgrades_b,
+                evolution_b,
+                mut visibility_b,
+                mut respawn_b,
+                mut brain_b,
+            ),
         ],
     ) = combinations.fetch_next()
     {
@@ -673,6 +792,39 @@ pub fn check_enemy_bot_enemy_bot_collisions(
             transform_a.translation.y = transform_a.translation.y.clamp(-half, half);
             transform_b.translation.x = transform_b.translation.x.clamp(-half, half);
             transform_b.translation.y = transform_b.translation.y.clamp(-half, half);
+
+            let body_damage_a = constants::shape_damage(4)
+                + upgrades_a.0.body_damage()
+                + evolution_a.0.body_damage_bonus();
+            let body_damage_b = constants::shape_damage(4)
+                + upgrades_b.0.body_damage()
+                + evolution_b.0.body_damage_bonus();
+            if cooldown_a.0 <= 0.0 {
+                brain_a.note_attacker(entity_b);
+                if apply_enemy_bot_damage(&mut health_a, body_damage_b) {
+                    finish_enemy_bot_death(
+                        entity_a,
+                        &mut visibility_a,
+                        &mut respawn_a,
+                        &mut deaths,
+                        Some(CombatantId::EnemyBot(entity_b)),
+                    );
+                }
+                cooldown_a.0 = constants::PLAYER_DAMAGE_COOLDOWN;
+            }
+            if cooldown_b.0 <= 0.0 {
+                brain_b.note_attacker(entity_a);
+                if apply_enemy_bot_damage(&mut health_b, body_damage_a) {
+                    finish_enemy_bot_death(
+                        entity_b,
+                        &mut visibility_b,
+                        &mut respawn_b,
+                        &mut deaths,
+                        Some(CombatantId::EnemyBot(entity_a)),
+                    );
+                }
+                cooldown_b.0 = constants::PLAYER_DAMAGE_COOLDOWN;
+            }
         }
 
         let repulsion_strength = (1.0 - distance / repulsion_distance).clamp(0.0, 1.0);
@@ -770,6 +922,12 @@ fn apply_shape_damage(health: &mut Health, damage: u32) -> bool {
     let was_alive = health.0 > 0;
     health.0 = health.0.saturating_sub(damage);
     was_alive && health.0 == 0
+}
+
+fn apply_player_damage(health: &mut PlayerHealth, damage: u32) -> bool {
+    let was_alive = health.current > 0;
+    health.current = health.current.saturating_sub(damage);
+    was_alive && health.current == 0
 }
 
 fn push_dead_shape(dead_shapes: &mut Vec<Entity>, entity: Entity) {

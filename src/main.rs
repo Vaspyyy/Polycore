@@ -1,15 +1,24 @@
 mod collision;
+mod combat;
 mod constants;
 mod enemy_bot;
+mod enemy_bot_ai;
 mod evolution;
 mod hud;
+mod leaderboard;
 mod menu;
 mod player;
 mod projectile;
 mod rng;
 mod shape;
 
-use bevy::prelude::*;
+use bevy::{
+    input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
+    prelude::*,
+};
+
+#[derive(Component)]
+struct ZoomVignette;
 
 fn main() {
     App::new()
@@ -40,6 +49,8 @@ fn main() {
         .insert_resource(menu::NameInputFocus::default())
         .insert_resource(menu::RunStats::default())
         .insert_resource(menu::DeathSummary::default())
+        .insert_resource(combat::CombatDeathQueue::default())
+        .insert_resource(enemy_bot::EnemyBotResetPending::default())
         .insert_resource(hud::UpgradeState::default())
         .insert_resource(evolution::EvolutionState::default())
         .add_systems(
@@ -51,6 +62,7 @@ fn main() {
                 enemy_bot::setup_enemy_bots,
                 shape::setup_xp,
                 hud::setup_hud,
+                leaderboard::setup_leaderboard,
                 evolution::setup_evolution_menu,
                 menu::setup_menu,
             ),
@@ -67,6 +79,8 @@ fn main() {
                 menu::handle_death_buttons,
                 menu::sync_phase_visibility,
                 enemy_bot::sync_enemy_bot_visibility,
+                leaderboard::sync_leaderboard_visibility,
+                hide_zoom_vignette,
                 menu::sync_death_summary,
                 evolution::queue_evolution_choices,
                 evolution::update_evolution_menu,
@@ -79,6 +93,7 @@ fn main() {
         .add_systems(
             Update,
             (
+                camera_zoom,
                 player::player_aim,
                 player::update_barrel,
                 player::update_player_upgrade_stats,
@@ -89,6 +104,7 @@ fn main() {
                 projectile::shoot_projectile,
                 camera_follow,
                 hud::update_hud,
+                leaderboard::update_leaderboard,
                 hud::animate_upgrade_fills,
                 hud::handle_upgrade_buttons,
                 hud::handle_upgrade_hotkeys,
@@ -100,7 +116,8 @@ fn main() {
             FixedUpdate,
             (
                 player::player_movement,
-                enemy_bot::enemy_bot_ai_update,
+                enemy_bot_ai::respawn_enemy_bots,
+                enemy_bot_ai::enemy_bot_ai_update,
                 collision::check_enemy_bot_enemy_bot_collisions,
                 shape::shape_knockback_update,
                 projectile::projectile_update,
@@ -112,6 +129,7 @@ fn main() {
                 collision::check_player_shape_collisions,
                 collision::check_enemy_bot_shape_collisions,
                 collision::check_shape_shape_collisions,
+                combat::resolve_combat_deaths,
                 shape::check_level_up,
             )
                 .chain()
@@ -122,21 +140,41 @@ fn main() {
 
 fn setup_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
+    commands.spawn((
+        ZoomVignette,
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(0.0),
+            top: Val::Px(0.0),
+            width: Val::Percent(100.0),
+            height: Val::Percent(100.0),
+            ..default()
+        },
+        zoom_vignette_gradient(0.0),
+        Pickable::IGNORE,
+        GlobalZIndex(-10),
+        Visibility::Hidden,
+    ));
 }
 
 fn camera_follow(
+    window: Single<&Window>,
     player: Query<&Transform, With<player::Player>>,
-    mut camera: Query<&mut Transform, (With<Camera>, Without<player::Player>)>,
+    mut camera: Query<(&mut Transform, &Projection), (With<Camera>, Without<player::Player>)>,
 ) {
     let Ok(player_transform) = player.single() else {
         return;
     };
-    let Ok(mut camera_transform) = camera.single_mut() else {
+    let Ok((mut camera_transform, projection)) = camera.single_mut() else {
         return;
     };
+    let zoom = match projection {
+        Projection::Orthographic(orthographic) => orthographic.scale,
+        _ => 1.0,
+    };
     let half = constants::arena_half_extent();
-    let max_camera_x = (half - constants::WINDOW_WIDTH / 2.0).max(0.0);
-    let max_camera_y = (half - constants::WINDOW_HEIGHT / 2.0).max(0.0);
+    let max_camera_x = (half - window.width() * zoom / 2.0).max(0.0);
+    let max_camera_y = (half - window.height() * zoom / 2.0).max(0.0);
 
     camera_transform.translation.x = player_transform
         .translation
@@ -146,6 +184,78 @@ fn camera_follow(
         .translation
         .y
         .clamp(-max_camera_y, max_camera_y);
+}
+
+fn camera_zoom(
+    scroll: Res<AccumulatedMouseScroll>,
+    mut camera: Query<&mut Projection, With<Camera>>,
+    mut vignette: Query<(&mut BackgroundGradient, &mut Visibility), With<ZoomVignette>>,
+) {
+    let Ok(mut projection) = camera.single_mut() else {
+        return;
+    };
+    let Projection::Orthographic(orthographic) = &mut *projection else {
+        return;
+    };
+
+    let scroll_delta = match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    };
+    if scroll_delta.abs() > f32::EPSILON {
+        let zoom_delta = -scroll_delta * constants::CAMERA_ZOOM_SPEED;
+        let resistance = if zoom_delta > 0.0 {
+            1.0 - zoom_warning_strength(orthographic.scale) * 0.72
+        } else {
+            1.0
+        };
+        let zoom_factor = (zoom_delta * resistance).exp();
+        orthographic.scale = (orthographic.scale * zoom_factor)
+            .clamp(constants::CAMERA_MIN_ZOOM, constants::CAMERA_MAX_ZOOM);
+    }
+
+    let strength = zoom_warning_strength(orthographic.scale);
+    for (mut gradient, mut visibility) in vignette.iter_mut() {
+        *visibility = if strength > 0.001 {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        *gradient = zoom_vignette_gradient(strength);
+    }
+}
+
+fn zoom_warning_strength(scale: f32) -> f32 {
+    let raw_strength = ((scale - constants::CAMERA_SOFT_MAX_ZOOM)
+        / (constants::CAMERA_MAX_ZOOM - constants::CAMERA_SOFT_MAX_ZOOM))
+        .clamp(0.0, 1.0);
+    raw_strength * raw_strength * (3.0 - 2.0 * raw_strength)
+}
+
+fn hide_zoom_vignette(
+    phase: Res<menu::GamePhase>,
+    mut vignette: Query<&mut Visibility, With<ZoomVignette>>,
+) {
+    if !phase.is_changed() || *phase == menu::GamePhase::Playing {
+        return;
+    }
+    for mut visibility in vignette.iter_mut() {
+        *visibility = Visibility::Hidden;
+    }
+}
+
+fn zoom_vignette_gradient(strength: f32) -> BackgroundGradient {
+    let edge_alpha = 0.68 * strength;
+    BackgroundGradient::from(RadialGradient {
+        position: UiPosition::CENTER,
+        shape: RadialGradientShape::FarthestCorner,
+        stops: vec![
+            ColorStop::percent(Color::NONE, 52.0),
+            ColorStop::percent(Color::srgba(0.0, 0.0, 0.0, edge_alpha * 0.22), 72.0),
+            ColorStop::percent(Color::srgba(0.0, 0.0, 0.0, edge_alpha), 100.0),
+        ],
+        ..default()
+    })
 }
 
 fn setup_grid(

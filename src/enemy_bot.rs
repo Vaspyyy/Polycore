@@ -1,34 +1,32 @@
 use crate::{
+    combat::{CombatDeathQueue, CombatStats, CombatantId},
     constants,
-    evolution::EvolutionState,
-    hud::UpgradeState,
+    evolution::{self, BarrelSpec, EvolutionKind, EvolutionState},
+    hud::{UpgradeKind, UpgradeState},
     menu::GamePhase,
-    player::{self, Player, PlayerHealth, Velocity},
-    projectile::{
-        Lifetime, Projectile, ProjectileDamage, ProjectileKnockback, ProjectileOwner,
-        ProjectilePenetration, ShootCooldown,
-    },
+    player::Player,
+    projectile::ShootCooldown,
     rng::Rng,
-    shape::{Health, Shape},
 };
 use bevy::prelude::*;
 
-const BOT_COUNT: usize = 5;
-const BOT_BARREL_LENGTH: f32 = 30.0;
-const BOT_BARREL_WIDTH: f32 = 7.0;
-const BOT_BARREL_OVERLAP: f32 = 2.0;
-const BOT_TURRET_SPIN_SPEED: f32 = 0.45;
+pub const BOT_COUNT: usize = 5;
+pub const BOT_BARREL_OVERLAP: f32 = 2.0;
+pub const BOT_RESPAWN_DELAY: f32 = 4.0;
 const BOT_NAME_OFFSET_Y: f32 = 38.0;
-const BOT_APPROACH_DISTANCE: f32 = 270.0;
-const BOT_RETREAT_DISTANCE: f32 = 150.0;
-const BOT_FIRE_RANGE: f32 = 520.0;
-const BOT_VIEW_RANGE: f32 = 620.0;
-const BOT_LOW_HEALTH_FRACTION: f32 = 0.35;
 const BOT_SPAWN_MIN_DISTANCE: f32 = 220.0;
 
 const BOT_NAMES: [&str; 12] = [
     "Scrapjaw", "Hex", "Rivet", "Bishop", "Torque", "Mako", "Vex", "Bolt", "Kilo", "Nyx", "Axle",
     "Cipher",
+];
+
+const BOT_PLAYSTYLES: [EnemyBotPlaystyle; BOT_COUNT] = [
+    EnemyBotPlaystyle::Brawler,
+    EnemyBotPlaystyle::Sharpshooter,
+    EnemyBotPlaystyle::Juggernaut,
+    EnemyBotPlaystyle::Sentinel,
+    EnemyBotPlaystyle::Skirmisher,
 ];
 
 #[derive(Component)]
@@ -75,7 +73,102 @@ pub struct EnemyBotSpawnPosition(pub Vec2);
 
 #[derive(Component)]
 pub struct EnemyBotTurret {
-    center_distance: f32,
+    pub(crate) slot: usize,
+    pub(crate) outline: bool,
+}
+
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EnemyBotPlaystyle {
+    Brawler,
+    Sharpshooter,
+    Juggernaut,
+    Sentinel,
+    Skirmisher,
+}
+
+impl EnemyBotPlaystyle {
+    pub(crate) fn upgrade_weights(self) -> &'static [u32; 8] {
+        match self {
+            Self::Brawler => &[1, 3, 2, 4, 4, 10, 10, 5],
+            Self::Sharpshooter => &[2, 3, 1, 10, 5, 9, 5, 5],
+            Self::Juggernaut => &[4, 10, 10, 1, 2, 1, 2, 7],
+            Self::Sentinel => &[10, 10, 2, 3, 4, 5, 5, 4],
+            Self::Skirmisher => &[3, 4, 2, 6, 5, 7, 8, 10],
+        }
+    }
+
+    pub(crate) fn preferred_evolution(self) -> EvolutionKind {
+        match self {
+            Self::Brawler => EvolutionKind::Sprayer,
+            Self::Sharpshooter => EvolutionKind::Sniper,
+            Self::Juggernaut => EvolutionKind::RamCore,
+            Self::Sentinel => EvolutionKind::Guard,
+            Self::Skirmisher => EvolutionKind::Flanker,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnemyBotTargetKind {
+    Combatant,
+    Shape,
+}
+
+#[derive(Component, Debug)]
+pub struct EnemyBotBrain {
+    pub(crate) target: Option<Entity>,
+    pub(crate) target_kind: EnemyBotTargetKind,
+    pub(crate) decision_timer: f32,
+    pub(crate) strafe_timer: f32,
+    pub(crate) strafe_direction: f32,
+    pub(crate) last_attacker: Option<Entity>,
+    pub(crate) retaliation_timer: f32,
+    pub(crate) engagement_timer: f32,
+    pub(crate) truce_timer: f32,
+    pub(crate) fleeing: bool,
+    pub(crate) aim_angle: f32,
+}
+
+impl Default for EnemyBotBrain {
+    fn default() -> Self {
+        Self {
+            target: None,
+            target_kind: EnemyBotTargetKind::Combatant,
+            decision_timer: 0.0,
+            strafe_timer: 0.0,
+            strafe_direction: 1.0,
+            last_attacker: None,
+            retaliation_timer: 0.0,
+            engagement_timer: 0.0,
+            truce_timer: 5.0,
+            fleeing: false,
+            aim_angle: std::f32::consts::FRAC_PI_2,
+        }
+    }
+}
+
+impl EnemyBotBrain {
+    pub fn note_attacker(&mut self, attacker: Entity) {
+        self.last_attacker = Some(attacker);
+        self.retaliation_timer = 6.0;
+        self.decision_timer = 0.0;
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
+#[derive(Component, Default)]
+pub struct EnemyBotRespawnTimer(pub f32);
+
+#[derive(Resource)]
+pub struct EnemyBotResetPending(pub bool);
+
+impl Default for EnemyBotResetPending {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 #[derive(Component)]
@@ -83,12 +176,6 @@ pub struct EnemyBotHealthBarBack;
 
 #[derive(Component)]
 pub struct EnemyBotHealthBarFill;
-
-#[derive(Clone, Copy)]
-struct CombatTarget {
-    entity: Entity,
-    position: Vec2,
-}
 
 pub fn setup_enemy_bots(
     mut commands: Commands,
@@ -100,11 +187,7 @@ pub fn setup_enemy_bots(
     let outline_mesh = meshes.add(Circle::new(
         constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
     ));
-    let barrel_mesh = meshes.add(Rectangle::new(BOT_BARREL_WIDTH, BOT_BARREL_LENGTH));
-    let barrel_outline_mesh = meshes.add(Rectangle::new(
-        BOT_BARREL_WIDTH + constants::OUTLINE_THICKNESS * 2.0,
-        BOT_BARREL_LENGTH + constants::OUTLINE_THICKNESS * 2.0,
-    ));
+    let barrel_mesh = meshes.add(Rectangle::new(1.0, 1.0));
     let health_bar_back_mesh = meshes.add(Rectangle::new(
         constants::HEALTH_BAR_WIDTH,
         constants::HEALTH_BAR_HEIGHT,
@@ -147,7 +230,7 @@ pub fn setup_enemy_bots(
     let mut remaining_names = names.len();
     let mut occupied_positions = Vec::new();
 
-    for _ in 0..BOT_COUNT {
+    for (bot_index, playstyle) in BOT_PLAYSTYLES.iter().copied().enumerate() {
         let upgrades = UpgradeState::default();
         let evolution = EvolutionState::default();
         let max_health = enemy_bot_max_health(&upgrades, &evolution);
@@ -183,6 +266,13 @@ pub fn setup_enemy_bots(
                 EnemyBotHealProgress::default(),
                 ShootCooldown(0.0),
                 EnemyBotSpawnPosition(position),
+                playstyle,
+                EnemyBotBrain {
+                    strafe_direction: if bot_index % 2 == 0 { 1.0 } else { -1.0 },
+                    ..default()
+                },
+                EnemyBotRespawnTimer::default(),
+                CombatStats::default(),
             ))
             .with_children(|bot| {
                 bot.spawn((
@@ -190,13 +280,22 @@ pub fn setup_enemy_bots(
                     MeshMaterial2d(outline_material.clone()),
                     Transform::from_xyz(0.0, 0.0, -0.2),
                 ));
-                spawn_turret_part(
-                    bot,
-                    barrel_outline_mesh.clone(),
-                    outline_material.clone(),
-                    true,
-                );
-                spawn_turret_part(bot, barrel_mesh.clone(), barrel_material.clone(), false);
+                for slot in 0..evolution::MAX_BARRELS {
+                    spawn_turret_part(
+                        bot,
+                        barrel_mesh.clone(),
+                        outline_material.clone(),
+                        slot,
+                        true,
+                    );
+                    spawn_turret_part(
+                        bot,
+                        barrel_mesh.clone(),
+                        barrel_material.clone(),
+                        slot,
+                        false,
+                    );
+                }
                 bot.spawn((
                     EnemyBotHealthBarBack,
                     Mesh2d(health_bar_back_mesh.clone()),
@@ -237,31 +336,86 @@ pub fn refresh_enemy_bot_max_health(
     upgrades: &UpgradeState,
     evolution: &EvolutionState,
 ) {
+    let was_dead = health.current == 0;
     let missing_health = health.max.saturating_sub(health.current);
     health.max = enemy_bot_max_health(upgrades, evolution);
-    health.current = health.max.saturating_sub(missing_health);
+    health.current = if was_dead {
+        0
+    } else {
+        health.max.saturating_sub(missing_health)
+    };
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn award_enemy_bot_xp(
     xp_value: u32,
     xp: &mut EnemyBotXp,
     level: &mut EnemyBotLevel,
     upgrades: &mut EnemyBotUpgrades,
-    evolution: &EnemyBotEvolution,
+    evolution: &mut EnemyBotEvolution,
     health: &mut EnemyBotHealth,
+    playstyle: &EnemyBotPlaystyle,
+    stats: &mut CombatStats,
     rng: &mut Rng,
 ) {
     xp.0 += xp_value;
+    stats.score = stats.score.saturating_add(xp_value);
     while xp.0 >= constants::XP_PER_LEVEL {
         xp.0 -= constants::XP_PER_LEVEL;
         level.0 += 1;
         upgrades.0.add_points(1);
     }
 
-    let old_max = health.max;
-    while upgrades.0.spend_random_point(rng) {}
-    if health.max != enemy_bot_max_health(&upgrades.0, &evolution.0) || health.max != old_max {
+    spend_adaptive_upgrade_points(upgrades, health, playstyle, rng);
+    evolution
+        .0
+        .choose_kind_for_level(level.0, playstyle.preferred_evolution());
+    if health.max != enemy_bot_max_health(&upgrades.0, &evolution.0) {
         refresh_enemy_bot_max_health(health, &upgrades.0, &evolution.0);
+    }
+}
+
+fn spend_adaptive_upgrade_points(
+    upgrades: &mut EnemyBotUpgrades,
+    health: &EnemyBotHealth,
+    playstyle: &EnemyBotPlaystyle,
+    rng: &mut Rng,
+) {
+    let health_fraction = if health.current == 0 {
+        1.0
+    } else {
+        health.current as f32 / health.max.max(1) as f32
+    };
+    let target_regen_level = if health_fraction <= 0.25 {
+        3
+    } else if health_fraction <= 0.50 {
+        2
+    } else if health_fraction <= 0.70 {
+        1
+    } else {
+        0
+    };
+
+    while upgrades.0.points > 0 {
+        if upgrades.0.level_of(UpgradeKind::HealthRegen) < target_regen_level
+            && upgrades.0.spend_point_on(UpgradeKind::HealthRegen)
+        {
+            continue;
+        }
+
+        let mut weights = *playstyle.upgrade_weights();
+        if health_fraction <= 0.50 {
+            let regen = UpgradeKind::HealthRegen.index();
+            let max_health = UpgradeKind::MaxHealth.index();
+            let movement = UpgradeKind::MovementSpeed.index();
+            weights[regen] = weights[regen].saturating_mul(4).max(24);
+            weights[max_health] = weights[max_health].saturating_mul(2).saturating_add(6);
+            weights[movement] = weights[movement].saturating_add(4);
+        }
+
+        if !upgrades.0.spend_weighted_point(rng, &weights) {
+            break;
+        }
     }
 }
 
@@ -271,310 +425,66 @@ pub fn apply_enemy_bot_damage(health: &mut EnemyBotHealth, damage: u32) -> bool 
     was_alive && health.current == 0
 }
 
-pub fn enemy_bot_ai_update(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    time: Res<Time>,
-    mut rng: ResMut<Rng>,
-    mut bots: ParamSet<(
-        Query<(Entity, &Transform, &EnemyBotHealth), (With<EnemyBot>, Without<EnemyBotTurret>)>,
-        Query<
-            (
-                Entity,
-                &mut Transform,
-                &mut EnemyBotMoveVelocity,
-                &mut EnemyBotVelocity,
-                &mut EnemyBotDamageCooldown,
-                &mut EnemyBotHealth,
-                &mut EnemyBotHealProgress,
-                &EnemyBotUpgrades,
-                &EnemyBotEvolution,
-                &mut ShootCooldown,
-                &Children,
-            ),
-            (With<EnemyBot>, Without<EnemyBotTurret>),
-        >,
-    )>,
-    player: Query<
-        (Entity, &Transform, &PlayerHealth),
-        (With<Player>, Without<EnemyBot>, Without<EnemyBotTurret>),
-    >,
-    shapes: Query<(&Transform, &Health), (With<Shape>, Without<EnemyBot>, Without<EnemyBotTurret>)>,
-    mut turrets: Query<(&mut Transform, &EnemyBotTurret), Without<EnemyBot>>,
-) {
-    let dt = time.delta_secs();
-    let half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
-    let damping = (1.0 - constants::PLAYER_KNOCKBACK_DAMPING * dt).clamp(0.0, 1.0);
-    let projectile_mesh = meshes.add(Circle::new(constants::PROJECTILE_RADIUS));
-    let projectile_material = materials.add(Color::srgba(
-        constants::PROJECTILE_COLOR[0],
-        constants::PROJECTILE_COLOR[1],
-        constants::PROJECTILE_COLOR[2],
-        constants::PROJECTILE_COLOR[3],
-    ));
-
-    let mut combat_targets: Vec<CombatTarget> = Vec::new();
-    if let Ok((player_entity, player_transform, player_health)) = player.single()
-        && player_health.current > 0
-    {
-        combat_targets.push(CombatTarget {
-            entity: player_entity,
-            position: player_transform.translation.xy(),
-        });
-    }
-    combat_targets.extend(
-        bots.p0()
-            .iter()
-            .filter(|(_, _, health)| health.current > 0)
-            .map(|(entity, transform, _)| CombatTarget {
-                entity,
-                position: transform.translation.xy(),
-            }),
-    );
-
-    for (
-        bot_entity,
-        mut transform,
-        mut move_velocity,
-        mut knockback_velocity,
-        mut damage_cooldown,
-        mut health,
-        mut heal_progress,
-        upgrades,
-        evolution,
-        mut shoot_cooldown,
-        children,
-    ) in bots.p1().iter_mut()
-    {
-        if health.current == 0 {
-            move_velocity.0 = Vec2::ZERO;
-            continue;
-        }
-
-        regenerate_enemy_bot_health(&mut health, &mut heal_progress, upgrades, evolution, dt);
-        shoot_cooldown.0 -= dt;
-        let bot_pos = transform.translation.xy();
-        let target = nearest_combat_target(bot_entity, bot_pos, &combat_targets)
-            .or_else(|| nearest_shape(bot_pos, &shapes));
-        if let Some((target_pos, target_distance)) = target {
-            aim_enemy_bot_turrets(children, bot_pos, target_pos, &mut turrets);
-            update_enemy_bot_move_velocity(
-                &mut move_velocity,
-                bot_pos,
-                target_pos,
-                target_distance,
-                &health,
-                upgrades,
-                evolution,
-                dt,
-            );
-
-            if target_distance <= BOT_FIRE_RANGE && shoot_cooldown.0 <= 0.0 {
-                shoot_cooldown.0 = upgrades.0.reload_cooldown() * evolution.0.reload_multiplier();
-                shoot_enemy_bot_projectiles(
-                    &mut commands,
-                    &projectile_mesh,
-                    &projectile_material,
-                    bot_entity,
-                    transform.translation,
-                    target_pos,
-                    upgrades,
-                    evolution,
-                    &mut rng,
-                );
-            }
-        } else {
-            move_velocity.0 =
-                approach_velocity(move_velocity.0, Vec2::ZERO, constants::PLAYER_SPEED * dt);
-            spin_enemy_bot_turrets(children, &mut turrets, dt);
-        }
-
-        transform.translation += (move_velocity.0 + knockback_velocity.0).extend(0.0) * dt;
-        transform.translation.x = transform.translation.x.clamp(-half, half);
-        transform.translation.y = transform.translation.y.clamp(-half, half);
-        knockback_velocity.0 *= damping;
-        damage_cooldown.0 = (damage_cooldown.0 - dt).max(0.0);
-    }
-}
-
-fn regenerate_enemy_bot_health(
-    health: &mut EnemyBotHealth,
-    heal_progress: &mut EnemyBotHealProgress,
-    upgrades: &EnemyBotUpgrades,
-    evolution: &EnemyBotEvolution,
-    dt: f32,
-) {
-    let regen_per_second = upgrades.0.health_regen_per_second() + evolution.0.health_regen_bonus();
-    if regen_per_second <= 0.0 || health.current >= health.max {
-        heal_progress.0 = 0.0;
-        return;
-    }
-
-    heal_progress.0 += regen_per_second * dt;
-    let heal_amount = heal_progress.0.floor() as u32;
-    if heal_amount == 0 {
-        return;
-    }
-
-    health.current = (health.current + heal_amount).min(health.max);
-    heal_progress.0 -= heal_amount as f32;
-}
-
-fn nearest_shape(
-    bot_pos: Vec2,
-    shapes: &Query<
-        (&Transform, &Health),
-        (With<Shape>, Without<EnemyBot>, Without<EnemyBotTurret>),
-    >,
-) -> Option<(Vec2, f32)> {
-    shapes
-        .iter()
-        .filter(|(_, health)| health.0 > 0)
-        .map(|(transform, _)| {
-            let shape_pos = transform.translation.xy();
-            (shape_pos, bot_pos.distance(shape_pos))
-        })
-        .min_by(|(_, distance_a), (_, distance_b)| distance_a.total_cmp(distance_b))
-}
-
-fn nearest_combat_target(
+pub fn finish_enemy_bot_death(
     bot_entity: Entity,
-    bot_pos: Vec2,
-    targets: &[CombatTarget],
-) -> Option<(Vec2, f32)> {
-    targets
-        .iter()
-        .filter(|target| target.entity != bot_entity)
-        .map(|target| (target.position, bot_pos.distance(target.position)))
-        .filter(|(_, distance)| *distance <= BOT_VIEW_RANGE)
-        .min_by(|(_, distance_a), (_, distance_b)| distance_a.total_cmp(distance_b))
+    visibility: &mut Visibility,
+    respawn_timer: &mut EnemyBotRespawnTimer,
+    deaths: &mut CombatDeathQueue,
+    killer: Option<CombatantId>,
+) {
+    *visibility = Visibility::Hidden;
+    respawn_timer.0 = BOT_RESPAWN_DELAY;
+    deaths.record(CombatantId::EnemyBot(bot_entity), killer);
 }
 
-fn update_enemy_bot_move_velocity(
-    move_velocity: &mut EnemyBotMoveVelocity,
-    bot_pos: Vec2,
-    target_pos: Vec2,
-    target_distance: f32,
-    health: &EnemyBotHealth,
-    upgrades: &EnemyBotUpgrades,
-    evolution: &EnemyBotEvolution,
-    dt: f32,
-) {
-    let direction = (target_pos - bot_pos).normalize_or_zero();
-    let movement_speed = upgrades.0.movement_speed() * evolution.0.movement_multiplier();
-    let health_fraction = health.current as f32 / health.max.max(1) as f32;
-    let target_velocity = if health_fraction <= BOT_LOW_HEALTH_FRACTION {
-        -direction * movement_speed
-    } else if target_distance > BOT_APPROACH_DISTANCE {
-        direction * movement_speed
-    } else if target_distance < BOT_RETREAT_DISTANCE {
-        -direction * movement_speed
+pub(crate) fn enemy_bot_barrel_transform(
+    spec: BarrelSpec,
+    outline: bool,
+    aim_angle: f32,
+) -> Transform {
+    let direction = Vec2::from_angle(aim_angle + spec.angle_offset);
+    let right = Vec2::new(direction.y, -direction.x);
+    let center_distance = constants::PLAYER_RADIUS - BOT_BARREL_OVERLAP + spec.length / 2.0;
+    let center = direction * center_distance + right * spec.lateral_offset;
+    let outline_growth = if outline {
+        constants::OUTLINE_THICKNESS * 2.0
     } else {
-        Vec2::ZERO
+        0.0
     };
-    let acceleration = movement_speed / constants::PLAYER_ACCEL_TIME;
-    move_velocity.0 = approach_velocity(move_velocity.0, target_velocity, acceleration * dt);
-}
 
-fn approach_velocity(current: Vec2, target: Vec2, max_delta: f32) -> Vec2 {
-    let delta = target - current;
-    if delta.length_squared() <= max_delta * max_delta {
-        target
-    } else {
-        current + delta.normalize_or_zero() * max_delta
+    Transform {
+        translation: Vec3::new(center.x, center.y, if outline { -0.2 } else { -0.1 }),
+        rotation: Quat::from_rotation_z(
+            aim_angle + spec.angle_offset - std::f32::consts::FRAC_PI_2,
+        ),
+        scale: Vec3::new(
+            spec.width + outline_growth,
+            spec.length + outline_growth,
+            1.0,
+        ),
     }
 }
 
-fn aim_enemy_bot_turrets(
-    children: &Children,
-    bot_pos: Vec2,
-    target_pos: Vec2,
-    turrets: &mut Query<(&mut Transform, &EnemyBotTurret), Without<EnemyBot>>,
+fn spawn_turret_part(
+    bot: &mut ChildSpawnerCommands,
+    mesh: Handle<Mesh>,
+    material: Handle<ColorMaterial>,
+    slot: usize,
+    outline: bool,
 ) {
-    let direction = (target_pos - bot_pos).normalize_or_zero();
-    if direction.length_squared() <= 0.001 {
-        return;
-    }
-
-    let angle = direction.y.atan2(direction.x);
-    for child in children.iter() {
-        let Ok((mut transform, turret)) = turrets.get_mut(child) else {
-            continue;
-        };
-        transform.translation.x = direction.x * turret.center_distance;
-        transform.translation.y = direction.y * turret.center_distance;
-        transform.rotation = Quat::from_rotation_z(angle - std::f32::consts::FRAC_PI_2);
-    }
-}
-
-fn spin_enemy_bot_turrets(
-    children: &Children,
-    turrets: &mut Query<(&mut Transform, &EnemyBotTurret), Without<EnemyBot>>,
-    dt: f32,
-) {
-    let delta = BOT_TURRET_SPIN_SPEED * dt;
-    for child in children.iter() {
-        let Ok((mut transform, turret)) = turrets.get_mut(child) else {
-            continue;
-        };
-        let current_angle = transform.translation.y.atan2(transform.translation.x) + delta;
-        let direction = Vec2::from_angle(current_angle);
-        transform.translation.x = direction.x * turret.center_distance;
-        transform.translation.y = direction.y * turret.center_distance;
-        transform.rotation = Quat::from_rotation_z(current_angle - std::f32::consts::FRAC_PI_2);
-    }
-}
-
-fn shoot_enemy_bot_projectiles(
-    commands: &mut Commands,
-    projectile_mesh: &Handle<Mesh>,
-    projectile_material: &Handle<ColorMaterial>,
-    bot_entity: Entity,
-    bot_translation: Vec3,
-    target_pos: Vec2,
-    upgrades: &EnemyBotUpgrades,
-    evolution: &EnemyBotEvolution,
-    rng: &mut Rng,
-) {
-    let base_angle = (target_pos - bot_translation.xy())
-        .normalize_or_zero()
-        .to_angle();
-    let spread = evolution.0.spread_radians();
-    let base_damage = upgrades.0.bullet_damage() as f32 * evolution.0.bullet_damage_multiplier();
-    let bullet_speed = upgrades.0.bullet_speed() * evolution.0.bullet_speed_multiplier();
-    let lifetime = constants::PROJECTILE_LIFETIME * evolution.0.projectile_lifetime_multiplier();
-    let knockback = evolution.0.bullet_knockback_multiplier();
-
-    for spec in evolution.0.barrel_specs() {
-        let jitter = if spread > 0.0 {
-            let roll = rng.next(10_000) as f32 / 9_999.0;
-            (roll * 2.0 - 1.0) * spread
+    let default_evolution = EvolutionState::default();
+    let spec = default_evolution.barrel_specs()[0];
+    bot.spawn((
+        EnemyBotTurret { slot, outline },
+        Mesh2d(mesh),
+        MeshMaterial2d(material),
+        enemy_bot_barrel_transform(spec, outline, std::f32::consts::FRAC_PI_2),
+        if slot == 0 {
+            Visibility::Visible
         } else {
-            0.0
-        };
-        let shot_angle = base_angle + spec.angle_offset + jitter;
-        let direction = Vec2::from_angle(shot_angle);
-        let right = Vec2::new(direction.y, -direction.x);
-        let spawn_pos = bot_translation
-            + (direction * player::muzzle_projectile_distance(spec.length)
-                + right * spec.lateral_offset)
-                .extend(1.0);
-        let damage = (base_damage * spec.damage_multiplier).round().max(1.0) as u32;
-
-        commands.spawn((
-            Projectile,
-            ProjectileOwner::EnemyBot(bot_entity),
-            Lifetime(lifetime),
-            ProjectileDamage(damage),
-            ProjectilePenetration(upgrades.0.bullet_penetration()),
-            ProjectileKnockback(knockback),
-            Mesh2d(projectile_mesh.clone()),
-            MeshMaterial2d(projectile_material.clone()),
-            Transform::from_translation(spawn_pos),
-            Velocity(direction * bullet_speed),
-        ));
-    }
+            Visibility::Hidden
+        },
+    ));
 }
 
 pub fn update_enemy_bot_health_bars(
@@ -596,7 +506,7 @@ pub fn update_enemy_bot_health_bars(
         } else {
             Visibility::Hidden
         };
-        let health_fraction = (health.current as f32 / health.max as f32).clamp(0.0, 1.0);
+        let health_fraction = (health.current as f32 / health.max.max(1) as f32).clamp(0.0, 1.0);
 
         for child in children.iter() {
             let Ok((mut transform, mut bar_visibility, back, fill)) = bars.get_mut(child) else {
@@ -619,25 +529,9 @@ pub fn update_enemy_bot_health_bars(
     }
 }
 
-fn spawn_turret_part(
-    bot: &mut ChildSpawnerCommands,
-    mesh: Handle<Mesh>,
-    material: Handle<ColorMaterial>,
-    outline: bool,
-) {
-    let center_distance = constants::PLAYER_RADIUS - BOT_BARREL_OVERLAP + BOT_BARREL_LENGTH / 2.0;
-    let z = if outline { 0.2 } else { 0.4 };
-
-    bot.spawn((
-        EnemyBotTurret { center_distance },
-        Mesh2d(mesh),
-        MeshMaterial2d(material),
-        Transform::from_xyz(0.0, center_distance, z),
-    ));
-}
-
 pub fn sync_enemy_bot_visibility(
     phase: Res<GamePhase>,
+    mut reset_pending: ResMut<EnemyBotResetPending>,
     mut rng: ResMut<Rng>,
     player: Query<&Transform, (With<Player>, Without<EnemyBot>)>,
     mut bots: Query<
@@ -658,6 +552,14 @@ pub fn sync_enemy_bot_visibility(
         ),
         (With<EnemyBotSceneEntity>, Without<Player>),
     >,
+    mut bot_state: Query<
+        (
+            &mut EnemyBotRespawnTimer,
+            &mut EnemyBotBrain,
+            &mut CombatStats,
+        ),
+        With<EnemyBotSceneEntity>,
+    >,
 ) {
     if !phase.is_changed() {
         return;
@@ -668,6 +570,7 @@ pub fn sync_enemy_bot_visibility(
         .map(|transform| transform.translation.xy())
         .unwrap_or(Vec2::ZERO);
     let mut occupied_positions = Vec::new();
+    let should_reset = *phase == GamePhase::Playing && reset_pending.0;
 
     for (
         mut bot_visibility,
@@ -685,7 +588,7 @@ pub fn sync_enemy_bot_visibility(
         mut spawn_position,
     ) in bots.iter_mut()
     {
-        if *phase == GamePhase::Playing {
+        if should_reset {
             let position =
                 random_enemy_bot_spawn_position(&mut rng, &occupied_positions, player_pos);
             occupied_positions.push(position);
@@ -697,19 +600,37 @@ pub fn sync_enemy_bot_visibility(
             xp.0 = 0;
             level.0 = 1;
             transform.translation = position.extend(0.0);
+            transform.rotation = Quat::IDENTITY;
             velocity.0 = Vec2::ZERO;
             move_velocity.0 = Vec2::ZERO;
             damage_cooldown.0 = 0.0;
             heal_progress.0 = 0.0;
             shoot_cooldown.0 = 0.0;
             *bot_visibility = Visibility::Visible;
+        } else if *phase == GamePhase::Playing {
+            *bot_visibility = if health.current > 0 {
+                Visibility::Visible
+            } else {
+                Visibility::Hidden
+            };
         } else {
             *bot_visibility = Visibility::Hidden;
         }
     }
+
+    if should_reset {
+        for (mut respawn_timer, mut brain, mut stats) in bot_state.iter_mut() {
+            respawn_timer.0 = 0.0;
+            brain.reset();
+            *stats = CombatStats::default();
+        }
+    }
+    if *phase == GamePhase::Playing {
+        reset_pending.0 = false;
+    }
 }
 
-fn random_enemy_bot_spawn_position(
+pub(crate) fn random_enemy_bot_spawn_position(
     rng: &mut Rng,
     occupied_positions: &[Vec2],
     player_pos: Vec2,
@@ -736,4 +657,66 @@ fn random_enemy_bot_spawn_position(
 
 fn random_arena_axis(rng: &mut Rng, half: f32) -> f32 {
     rng.next((half * 2.0) as u32) as f32 - half
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bot_profiles_choose_distinct_evolutions() {
+        let mut evolutions = BOT_PLAYSTYLES
+            .iter()
+            .copied()
+            .map(EnemyBotPlaystyle::preferred_evolution)
+            .collect::<Vec<_>>();
+        evolutions.sort_by_key(|kind| *kind as u8);
+        evolutions.dedup();
+
+        assert_eq!(evolutions.len(), BOT_COUNT);
+    }
+
+    #[test]
+    fn max_health_refresh_does_not_revive_dead_bot() {
+        let mut health = EnemyBotHealth {
+            current: 0,
+            max: constants::PLAYER_MAX_HEALTH,
+        };
+        let mut upgrades = UpgradeState::default();
+        upgrades.levels[1] = 2;
+
+        refresh_enemy_bot_max_health(&mut health, &upgrades, &EvolutionState::default());
+
+        assert_eq!(health.current, 0);
+        assert_eq!(health.max, constants::PLAYER_MAX_HEALTH + 40);
+    }
+
+    #[test]
+    fn low_health_bot_spends_its_next_point_on_regeneration() {
+        let mut xp = EnemyBotXp::default();
+        let mut level = EnemyBotLevel(1);
+        let mut upgrades = EnemyBotUpgrades(UpgradeState::default());
+        let mut evolution = EnemyBotEvolution(EvolutionState::default());
+        let mut health = EnemyBotHealth {
+            current: 10,
+            max: constants::PLAYER_MAX_HEALTH,
+        };
+        let mut stats = CombatStats::default();
+        let mut rng = Rng::new(17);
+
+        award_enemy_bot_xp(
+            constants::XP_PER_LEVEL,
+            &mut xp,
+            &mut level,
+            &mut upgrades,
+            &mut evolution,
+            &mut health,
+            &EnemyBotPlaystyle::Brawler,
+            &mut stats,
+            &mut rng,
+        );
+
+        assert_eq!(level.0, 2);
+        assert_eq!(upgrades.0.level_of(UpgradeKind::HealthRegen), 1);
+    }
 }
