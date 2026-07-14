@@ -82,8 +82,12 @@ fn barrel_center_distance(length: f32, radius: f32) -> f32 {
     radius - BARREL_OVERLAP + length / 2.0
 }
 
-pub fn muzzle_projectile_distance(length: f32, evolution: &EvolutionState) -> f32 {
-    crate::tank::radius(evolution) - BARREL_OVERLAP + length + constants::PROJECTILE_RADIUS
+pub fn muzzle_projectile_distance(
+    length: f32,
+    evolution: &EvolutionState,
+    projectile_radius: f32,
+) -> f32 {
+    crate::tank::radius(evolution) - BARREL_OVERLAP + length + projectile_radius
 }
 
 pub fn barrel_local_axes(angle_offset: f32) -> (Vec2, Vec2) {
@@ -140,6 +144,7 @@ pub fn setup_player(
             Velocity::default(),
             MoveVelocity::default(),
             CombatStats::default(),
+            crate::combat::LifeGeneration::default(),
             ShootCooldown(0.0),
             SpawnProtection::default(),
             RecentDamage::default(),
@@ -148,6 +153,10 @@ pub fn setup_player(
             MeshMaterial2d(selected.body.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
             Visibility::Hidden,
+        ))
+        .insert((
+            crate::ability::ActiveAbilityState::default(),
+            crate::ability::Slowed::default(),
         ))
         .id();
 
@@ -275,12 +284,21 @@ pub fn player_movement(
             &mut MoveVelocity,
             &mut DamageCooldown,
             &crate::passive::PassiveRuntime,
+            &crate::ability::ActiveAbilityState,
+            &crate::ability::Slowed,
         ),
         With<Player>,
     >,
 ) {
-    let Ok((mut transform, mut velocity, mut move_velocity, mut damage_cooldown, passive_runtime)) =
-        query.single_mut()
+    let Ok((
+        mut transform,
+        mut velocity,
+        mut move_velocity,
+        mut damage_cooldown,
+        passive_runtime,
+        ability_state,
+        slowed,
+    )) = query.single_mut()
     else {
         return;
     };
@@ -299,11 +317,17 @@ pub fn player_movement(
         direction.x += 1.0;
     }
 
-    let direction = direction.normalize_or_zero();
+    let direction = if ability_state.forces_forward_movement() {
+        (transform.rotation * Vec3::Y).xy().normalize_or_zero()
+    } else {
+        direction.normalize_or_zero()
+    };
     let dt = time.delta_secs();
     let movement_speed = upgrades.movement_speed()
         * evolution.movement_multiplier()
-        * crate::passive::movement_multiplier(passive_runtime, evolution.passive());
+        * crate::passive::movement_multiplier(passive_runtime, evolution.current_kind)
+        * ability_state.movement_multiplier()
+        * slowed.movement_multiplier();
     let target_velocity = direction * movement_speed;
     let acceleration = movement_speed / constants::PLAYER_ACCEL_TIME;
     move_velocity.0 = approach_velocity(move_velocity.0, target_velocity, acceleration * dt);
@@ -335,9 +359,19 @@ pub fn update_player_upgrade_stats(
         return;
     }
 
+    let was_alive = health.current > 0.0;
     let missing_health = (health.max - health.current).max(0.0);
     health.max = upgraded_max;
-    health.current = (upgraded_max - missing_health).max(0.0);
+    health.current = adjusted_health_after_max_change(upgraded_max, missing_health, was_alive);
+}
+
+fn adjusted_health_after_max_change(max_health: f32, missing_health: f32, was_alive: bool) -> f32 {
+    let adjusted = (max_health - missing_health).max(0.0);
+    if was_alive {
+        adjusted.max(1.0).min(max_health)
+    } else {
+        0.0
+    }
 }
 
 pub fn regenerate_player_health(
@@ -383,9 +417,10 @@ fn approach_velocity(current: Vec2, target: Vec2, max_delta: f32) -> Vec2 {
 pub fn player_aim(
     window: Single<&Window>,
     camera: Single<(&Camera, &GlobalTransform)>,
-    mut query: Query<&mut Transform, With<Player>>,
+    time: Res<Time>,
+    mut query: Query<(&mut Transform, &crate::ability::ActiveAbilityState), With<Player>>,
 ) {
-    let Ok(mut transform) = query.single_mut() else {
+    let Ok((mut transform, ability)) = query.single_mut() else {
         return;
     };
 
@@ -398,8 +433,17 @@ pub fn player_aim(
 
     let delta = world_pos - transform.translation.xy();
     if delta.length_squared() > 0.001 {
-        transform.rotation =
-            Quat::from_rotation_z(delta.y.atan2(delta.x) - std::f32::consts::FRAC_PI_2);
+        let target = delta.y.atan2(delta.x) - std::f32::consts::FRAC_PI_2;
+        if ability.limited_turning() {
+            let (_, _, current) = transform.rotation.to_euler(EulerRot::XYZ);
+            let turn = (target - current + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            transform.rotation = Quat::from_rotation_z(
+                current + turn.clamp(-1.2 * time.delta_secs(), 1.2 * time.delta_secs()),
+            );
+        } else {
+            transform.rotation = Quat::from_rotation_z(target);
+        }
     }
 }
 
@@ -557,9 +601,18 @@ mod tests {
         let barrel_tip_distance = constants::PLAYER_RADIUS - BARREL_OVERLAP + barrel_length;
 
         assert!(
-            muzzle_projectile_distance(barrel_length, &EvolutionState::default())
-                > barrel_tip_distance
+            muzzle_projectile_distance(
+                barrel_length,
+                &EvolutionState::default(),
+                constants::PROJECTILE_RADIUS,
+            ) > barrel_tip_distance
         );
+    }
+
+    #[test]
+    fn max_health_reduction_keeps_a_living_player_alive() {
+        assert_eq!(adjusted_health_after_max_change(40.0, 45.0, true), 1.0);
+        assert_eq!(adjusted_health_after_max_change(40.0, 45.0, false), 0.0);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use crate::{
     enemy_bot::{
         EnemyBot, EnemyBotEvolution, EnemyBotHealth, EnemyBotMoveVelocity, EnemyBotUpgrades,
     },
-    evolution::{EvolutionState, PassiveKind},
+    evolution::{EvolutionKind, EvolutionState, PassiveKind},
     hud::UpgradeState,
     player::{MoveVelocity, Player, PlayerHealth},
     projectile::ShootCooldown,
@@ -24,6 +24,7 @@ pub struct PassiveRuntime {
     pub speed_boost: f32,
     pub speed_boost_cooldown: f32,
     pub volley_phase: bool,
+    pub firing: bool,
 }
 
 impl Default for PassiveRuntime {
@@ -41,6 +42,7 @@ impl Default for PassiveRuntime {
             speed_boost: 0.0,
             speed_boost_cooldown: 0.0,
             volley_phase: false,
+            firing: false,
         }
     }
 }
@@ -73,13 +75,15 @@ impl PassiveRuntime {
 
     pub fn update(
         &mut self,
-        passive: PassiveKind,
+        evolution: EvolutionKind,
         dt: f32,
         speed_fraction: f32,
         firing: bool,
         recently_damaged: bool,
         max_health: f32,
     ) {
+        let passive = crate::evolution::definition(evolution).passive;
+        self.firing = firing;
         if firing {
             self.sustained_fire = (self.sustained_fire + dt).min(1.5);
         } else {
@@ -106,13 +110,15 @@ impl PassiveRuntime {
 
         if passive == PassiveKind::FrontalShield {
             let first_activation = self.shield_max <= 0.0;
-            self.shield_max = max_health * 0.25;
+            let capstone = evolution == EvolutionKind::Guardian;
+            self.shield_max = max_health * if capstone { 0.35 } else { 0.25 };
             if first_activation {
                 self.shield = self.shield_max;
             } else if self.shield <= 0.0 && self.no_damage < 4.0 {
                 self.shield = 0.0;
             } else if self.no_damage >= 4.0 {
-                self.shield = (self.shield + max_health * 0.10 * dt).min(self.shield_max);
+                let recharge = if capstone { 0.15 } else { 0.10 };
+                self.shield = (self.shield + max_health * recharge * dt).min(self.shield_max);
             }
         } else {
             self.shield = 0.0;
@@ -120,24 +126,57 @@ impl PassiveRuntime {
         }
     }
 
-    pub fn shot_adjustments(&mut self, passive: PassiveKind) -> ShotAdjustments {
+    pub fn shot_adjustments(&mut self, evolution: EvolutionKind) -> ShotAdjustments {
+        let passive = crate::evolution::definition(evolution).passive;
         let mut adjustment = ShotAdjustments::default();
         match passive {
             PassiveKind::MinigunSpin => {
                 let spin = (self.sustained_fire / 1.5).clamp(0.0, 1.0);
-                adjustment.cooldown_multiplier = 1.0 - spin * 0.25;
-                adjustment.spread_multiplier = 1.0 + spin * 0.40;
+                adjustment.cooldown_multiplier = 1.0
+                    - spin
+                        * if evolution == EvolutionKind::Sentry {
+                            0.35
+                        } else {
+                            0.25
+                        };
+                adjustment.spread_multiplier = 1.0
+                    + spin
+                        * if evolution == EvolutionKind::Sentry {
+                            0.30
+                        } else {
+                            0.40
+                        };
             }
-            PassiveKind::Stabilized if self.stationary >= 0.75 => {
-                adjustment.speed_multiplier = 1.20;
-                adjustment.spread_multiplier = 0.40;
+            PassiveKind::Stabilized
+                if self.stationary
+                    >= if evolution == EvolutionKind::Emplacement {
+                        0.60
+                    } else {
+                        0.75
+                    } =>
+            {
+                adjustment.speed_multiplier = if evolution == EvolutionKind::Emplacement {
+                    1.30
+                } else {
+                    1.20
+                };
+                adjustment.spread_multiplier = if evolution == EvolutionKind::Emplacement {
+                    0.25
+                } else {
+                    0.40
+                };
             }
             PassiveKind::AlternatingPairs => {
                 adjustment.bank = Some(usize::from(self.volley_phase));
                 self.volley_phase = !self.volley_phase;
             }
             PassiveKind::PhasedFan => {
-                adjustment.angle_offset = if self.volley_phase { 0.04 } else { -0.04 };
+                let offset = if evolution == EvolutionKind::Bombardier {
+                    0.07
+                } else {
+                    0.04
+                };
+                adjustment.angle_offset = if self.volley_phase { offset } else { -offset };
                 self.volley_phase = !self.volley_phase;
             }
             _ => {}
@@ -147,12 +186,20 @@ impl PassiveRuntime {
 
     pub fn projectile_hit_multiplier(
         &mut self,
-        passive: PassiveKind,
+        evolution: EvolutionKind,
         target: Entity,
         travel_distance: f32,
     ) -> f32 {
+        let passive = crate::evolution::definition(evolution).passive;
         match passive {
-            PassiveKind::DistanceDamage => 1.0 + (travel_distance / 100.0 * 0.05).min(0.60),
+            PassiveKind::DistanceDamage => {
+                let cap = match evolution {
+                    EvolutionKind::Lancer => 0.80,
+                    EvolutionKind::Deadeye => 0.90,
+                    _ => 0.60,
+                };
+                1.0 + (travel_distance / 100.0 * 0.05).min(cap)
+            }
             PassiveKind::HunterMark => {
                 if self.tracked_target == Some(target)
                     && self.stack_timer > 0.0
@@ -163,25 +210,53 @@ impl PassiveRuntime {
                     1.25
                 } else {
                     self.tracked_target = Some(target);
-                    self.follow_up_hits = 2;
+                    self.follow_up_hits = if evolution == EvolutionKind::Pursuer {
+                        3
+                    } else {
+                        2
+                    };
                     self.stack_timer = 2.5;
                     1.0
                 }
             }
             PassiveKind::ConsecutiveHits => {
                 if self.tracked_target == Some(target) && self.stack_timer > 0.0 {
-                    self.stacks = self.stacks.saturating_add(1).min(5);
+                    self.stacks =
+                        self.stacks
+                            .saturating_add(1)
+                            .min(if evolution == EvolutionKind::Impaler {
+                                7
+                            } else {
+                                5
+                            });
                 } else {
                     self.tracked_target = Some(target);
                     self.stacks = 0;
                 }
-                self.stack_timer = 1.5;
-                1.0 + self.stacks as f32 * 0.08
+                self.stack_timer = if evolution == EvolutionKind::Impaler {
+                    2.0
+                } else {
+                    1.5
+                };
+                1.0 + self.stacks as f32
+                    * if evolution == EvolutionKind::Impaler {
+                        0.07
+                    } else {
+                        0.08
+                    }
             }
             PassiveKind::HitSpeed => {
                 if self.speed_boost_cooldown <= 0.0 {
-                    self.speed_boost = 1.2;
-                    self.speed_boost_cooldown = 2.5;
+                    self.speed_boost = if evolution == EvolutionKind::Ace {
+                        1.5
+                    } else {
+                        1.2
+                    };
+                    self.speed_boost_cooldown = if evolution == EvolutionKind::Ace {
+                        2.0
+                    } else {
+                        2.5
+                    };
                 }
                 1.0
             }
@@ -191,17 +266,32 @@ impl PassiveRuntime {
 
     pub fn incoming_damage(
         &mut self,
-        passive: PassiveKind,
+        evolution: EvolutionKind,
         damage: f32,
         frontal: bool,
         _speed_fraction: f32,
     ) -> f32 {
+        let passive = crate::evolution::definition(evolution).passive;
         let mut damage = damage;
-        if passive == PassiveKind::Entrenched && self.stationary >= 1.25 {
-            damage *= 0.75;
+        let entrenched_after = if evolution == EvolutionKind::Stronghold {
+            1.0
+        } else {
+            1.25
+        };
+        if passive == PassiveKind::Entrenched && self.stationary >= entrenched_after && !self.firing
+        {
+            damage *= if evolution == EvolutionKind::Stronghold {
+                0.65
+            } else {
+                0.75
+            };
         }
         if passive == PassiveKind::FrontalArmor && frontal {
-            damage *= 0.65;
+            damage *= if evolution == EvolutionKind::Vanguard {
+                0.55
+            } else {
+                0.65
+            };
         }
         if passive == PassiveKind::FrontalShield && frontal && self.shield > 0.0 {
             let absorbed = damage.min(self.shield);
@@ -214,32 +304,57 @@ impl PassiveRuntime {
 
     pub fn incoming_contact_damage(
         &mut self,
-        passive: PassiveKind,
+        evolution: EvolutionKind,
         damage: f32,
         speed_fraction: f32,
     ) -> f32 {
+        let passive = crate::evolution::definition(evolution).passive;
         let mut damage = damage;
-        if passive == PassiveKind::Entrenched && self.stationary >= 1.25 {
-            damage *= 0.75;
+        let entrenched_after = if evolution == EvolutionKind::Stronghold {
+            1.0
+        } else {
+            1.25
+        };
+        if passive == PassiveKind::Entrenched && self.stationary >= entrenched_after {
+            damage *= if evolution == EvolutionKind::Stronghold {
+                0.65
+            } else {
+                0.75
+            };
         }
         if passive == PassiveKind::MomentumArmor && speed_fraction >= 0.8 {
-            damage *= 0.75;
+            damage *= if evolution == EvolutionKind::Dreadnought {
+                0.65
+            } else {
+                0.75
+            };
         }
         damage
     }
 }
 
-pub fn movement_multiplier(runtime: &PassiveRuntime, passive: PassiveKind) -> f32 {
-    if passive == PassiveKind::HitSpeed && runtime.speed_boost > 0.0 {
-        1.18
+pub fn movement_multiplier(runtime: &PassiveRuntime, evolution: EvolutionKind) -> f32 {
+    if crate::evolution::definition(evolution).passive == PassiveKind::HitSpeed
+        && runtime.speed_boost > 0.0
+    {
+        if evolution == EvolutionKind::Ace {
+            1.25
+        } else {
+            1.18
+        }
     } else {
         1.0
     }
 }
 
-pub fn body_damage_multiplier(passive: PassiveKind, speed_fraction: f32) -> f32 {
-    if passive == PassiveKind::MomentumArmor {
-        1.0 + (speed_fraction / 0.8).clamp(0.0, 1.0) * 0.50
+pub fn body_damage_multiplier(evolution: EvolutionKind, speed_fraction: f32) -> f32 {
+    if crate::evolution::definition(evolution).passive == PassiveKind::MomentumArmor {
+        1.0 + (speed_fraction / 0.8).clamp(0.0, 1.0)
+            * if evolution == EvolutionKind::Dreadnought {
+                0.70
+            } else {
+                0.50
+            }
     } else {
         1.0
     }
@@ -282,15 +397,21 @@ pub fn tick_passives(
     if let Ok((velocity, mut health, mut runtime, recent)) = player.single_mut() {
         let max_speed = player_upgrades.movement_speed() * player_evolution.movement_multiplier();
         runtime.update(
-            player_evolution.passive(),
+            player_evolution.current_kind,
             dt,
             velocity.0.length() / max_speed.max(1.0),
             mouse.pressed(MouseButton::Left),
             recent.remaining > 0.0,
             health.max,
         );
-        if player_evolution.passive() == PassiveKind::Entrenched
-            && runtime.stationary >= 1.25
+        if health.current > 0.0
+            && player_evolution.passive() == PassiveKind::Entrenched
+            && runtime.stationary
+                >= if player_evolution.current_kind == EvolutionKind::Stronghold {
+                    1.0
+                } else {
+                    1.25
+                }
             && !mouse.pressed(MouseButton::Left)
         {
             health.current = (health.current + 4.0 * dt).min(health.max);
@@ -299,15 +420,21 @@ pub fn tick_passives(
     for (velocity, mut health, mut runtime, recent, evolution, upgrades, cooldown) in &mut bots {
         let max_speed = upgrades.0.movement_speed() * evolution.0.movement_multiplier();
         runtime.update(
-            evolution.0.passive(),
+            evolution.0.current_kind,
             dt,
             velocity.0.length() / max_speed.max(1.0),
             cooldown.0 > 0.0,
             recent.remaining > 0.0,
             health.max,
         );
-        if evolution.0.passive() == PassiveKind::Entrenched
-            && runtime.stationary >= 1.25
+        if health.current > 0.0
+            && evolution.0.passive() == PassiveKind::Entrenched
+            && runtime.stationary
+                >= if evolution.0.current_kind == EvolutionKind::Stronghold {
+                    1.0
+                } else {
+                    1.25
+                }
             && cooldown.0 <= 0.0
         {
             health.current = (health.current + 4.0 * dt).min(health.max);
@@ -325,11 +452,11 @@ mod tests {
             sustained_fire: 1.5,
             ..default()
         };
-        let spin = runtime.shot_adjustments(PassiveKind::MinigunSpin);
+        let spin = runtime.shot_adjustments(EvolutionKind::Minigun);
         assert_eq!(spin.cooldown_multiplier, 0.75);
         assert_eq!(spin.spread_multiplier, 1.4);
         runtime.stationary = 0.75;
-        let stable = runtime.shot_adjustments(PassiveKind::Stabilized);
+        let stable = runtime.shot_adjustments(EvolutionKind::Stabilizer);
         assert_eq!(stable.speed_multiplier, 1.2);
         assert_eq!(stable.spread_multiplier, 0.4);
     }
@@ -339,17 +466,16 @@ mod tests {
         let target = Entity::from_bits(7);
         let mut hunter = PassiveRuntime::default();
         assert_eq!(
-            hunter.projectile_hit_multiplier(PassiveKind::HunterMark, target, 0.0),
+            hunter.projectile_hit_multiplier(EvolutionKind::Hunter, target, 0.0),
             1.0
         );
         assert_eq!(
-            hunter.projectile_hit_multiplier(PassiveKind::HunterMark, target, 0.0),
+            hunter.projectile_hit_multiplier(EvolutionKind::Hunter, target, 0.0),
             1.25
         );
         let mut needler = PassiveRuntime::default();
         for expected in [1.0, 1.08, 1.16, 1.24, 1.32, 1.40, 1.40] {
-            let actual =
-                needler.projectile_hit_multiplier(PassiveKind::ConsecutiveHits, target, 0.0);
+            let actual = needler.projectile_hit_multiplier(EvolutionKind::Needler, target, 0.0);
             assert!((actual - expected).abs() < 0.001);
         }
     }
@@ -362,12 +488,12 @@ mod tests {
             ..default()
         };
         assert_eq!(
-            runtime.incoming_damage(PassiveKind::FrontalShield, 7.0, true, 0.0),
+            runtime.incoming_damage(EvolutionKind::Bulwark, 7.0, true, 0.0),
             0.0
         );
         assert_eq!(runtime.shield, 3.0);
         assert_eq!(
-            runtime.incoming_damage(PassiveKind::FrontalShield, 7.0, false, 0.0),
+            runtime.incoming_damage(EvolutionKind::Bulwark, 7.0, false, 0.0),
             7.0
         );
     }
@@ -375,13 +501,31 @@ mod tests {
     #[test]
     fn bulwark_starts_full_and_recharges_after_four_seconds() {
         let mut runtime = PassiveRuntime::default();
-        runtime.update(PassiveKind::FrontalShield, 0.1, 0.0, false, false, 100.0);
+        runtime.update(EvolutionKind::Bulwark, 0.1, 0.0, false, false, 100.0);
         assert_eq!(runtime.shield, 25.0);
         runtime.shield = 0.0;
         runtime.no_damage = 3.8;
-        runtime.update(PassiveKind::FrontalShield, 0.1, 0.0, false, false, 100.0);
+        runtime.update(EvolutionKind::Bulwark, 0.1, 0.0, false, false, 100.0);
         assert_eq!(runtime.shield, 0.0);
-        runtime.update(PassiveKind::FrontalShield, 0.2, 0.0, false, false, 100.0);
+        runtime.update(EvolutionKind::Bulwark, 0.2, 0.0, false, false, 100.0);
         assert!(runtime.shield > 0.0);
+    }
+
+    #[test]
+    fn entrenched_mitigation_requires_holding_fire() {
+        let mut runtime = PassiveRuntime {
+            stationary: 2.0,
+            firing: true,
+            ..default()
+        };
+        assert_eq!(
+            runtime.incoming_damage(EvolutionKind::Fortress, 20.0, false, 0.0),
+            20.0
+        );
+        runtime.firing = false;
+        assert_eq!(
+            runtime.incoming_damage(EvolutionKind::Fortress, 20.0, false, 0.0),
+            15.0
+        );
     }
 }

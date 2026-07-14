@@ -13,9 +13,10 @@ use std::cmp::Ordering;
 
 const CHALLENGE_MIN_DELAY: f32 = 20.0;
 const CHALLENGE_DELAY_RANGE: f32 = 10.0;
-const CHALLENGE_MAX_DISTANCE: f32 = 1_400.0;
-const CHALLENGE_BREAK_DISTANCE: f32 = 1_200.0;
+const CHALLENGE_MAX_DISTANCE: f32 = 1_200.0;
+const CHALLENGE_BREAK_DISTANCE: f32 = 1_400.0;
 const CHALLENGE_DURATION: f32 = 10.0;
+const CROWN_PROFILE_COMMIT_INTERVAL: f32 = 5.0;
 const LEADER_INDICATOR_MARGIN: f32 = 52.0;
 
 #[derive(Clone, Copy, Debug)]
@@ -50,6 +51,8 @@ pub struct DominanceState {
     pub leader: Option<Entity>,
     pub leader_name: String,
     pub streak_secs: f32,
+    pending_player_crown_secs: f32,
+    player_was_leader: bool,
 }
 
 #[derive(Component)]
@@ -225,9 +228,11 @@ pub fn update_dominance(
         GamePhase::Playing | GamePhase::Paused | GamePhase::Dead
     ) {
         if phase.is_changed() {
+            commit_crown_progress(&mut state, &mut profile);
             state.leader = None;
             state.leader_name.clear();
             state.streak_secs = 0.0;
+            state.player_was_leader = false;
             for entity in &current_holders {
                 commands.entity(entity).remove::<CrownHolder>();
             }
@@ -255,6 +260,9 @@ pub fn update_dominance(
             state.streak_secs += time.delta_secs();
         }
     } else {
+        if state.player_was_leader {
+            commit_crown_progress(&mut state, &mut profile);
+        }
         for entity in &current_holders {
             commands.entity(entity).remove::<CrownHolder>();
         }
@@ -274,44 +282,77 @@ pub fn update_dominance(
     }
 
     for (marker, mut visibility) in &mut markers {
-        *visibility = if Some(marker.owner) == state.leader {
+        let next = if Some(marker.owner) == state.leader {
             Visibility::Visible
         } else {
             Visibility::Hidden
         };
+        if *visibility != next {
+            *visibility = next;
+        }
     }
 
     let player_is_leader =
         player_snapshot.is_some_and(|(entity, _, _)| Some(entity) == state.leader);
     if let Ok((mut text, mut visibility)) = hud.single_mut() {
         if player_is_leader {
-            **text = format!(
+            let next = format!(
                 "CROWN {:02}:{:02}  BEST {:02}:{:02}",
                 state.streak_secs as u32 / 60,
                 state.streak_secs as u32 % 60,
-                profile.data.records.best_crown_streak_secs as u32 / 60,
-                profile.data.records.best_crown_streak_secs as u32 % 60,
+                profile
+                    .data
+                    .records
+                    .best_crown_streak_secs
+                    .max(state.streak_secs) as u32
+                    / 60,
+                profile
+                    .data
+                    .records
+                    .best_crown_streak_secs
+                    .max(state.streak_secs) as u32
+                    % 60,
             );
-            *visibility = Visibility::Visible;
+            if **text != next {
+                **text = next;
+            }
+            if *visibility != Visibility::Visible {
+                *visibility = Visibility::Visible;
+            }
         } else {
-            *visibility = Visibility::Hidden;
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
         }
     }
 
     if player_is_leader {
         let dt = time.delta_secs();
-        profile.data.records.total_crown_time_secs += dt;
-        profile.data.records.best_crown_streak_secs = profile
+        state.pending_player_crown_secs += dt;
+        if state.pending_player_crown_secs >= CROWN_PROFILE_COMMIT_INTERVAL {
+            commit_crown_progress(&mut state, &mut profile);
+        }
+        if !profile
             .data
-            .records
-            .best_crown_streak_secs
-            .max(state.streak_secs);
-        profile.mark_dirty();
-        unlock(&mut profile, AchievementId::ClaimCrown, &mut achievements);
-        if state.streak_secs >= 30.0 {
+            .achievements
+            .contains(&AchievementId::ClaimCrown)
+        {
+            unlock(&mut profile, AchievementId::ClaimCrown, &mut achievements);
+        }
+        if state.streak_secs >= 30.0
+            && !profile
+                .data
+                .achievements
+                .contains(&AchievementId::CrownThirty)
+        {
             unlock(&mut profile, AchievementId::CrownThirty, &mut achievements);
         }
-        if state.streak_secs >= 120.0 {
+        if state.streak_secs >= 120.0
+            && !profile
+                .data
+                .achievements
+                .contains(&AchievementId::CrownOneTwenty)
+        {
             unlock(
                 &mut profile,
                 AchievementId::CrownOneTwenty,
@@ -319,6 +360,45 @@ pub fn update_dominance(
             );
         }
     }
+    state.player_was_leader = player_is_leader;
+}
+
+fn commit_crown_progress(state: &mut DominanceState, profile: &mut Profile) {
+    if state.pending_player_crown_secs <= 0.0 {
+        return;
+    }
+    profile.data.records.total_crown_time_secs += state.pending_player_crown_secs;
+    profile.data.records.best_crown_streak_secs = profile
+        .data
+        .records
+        .best_crown_streak_secs
+        .max(state.streak_secs);
+    state.pending_player_crown_secs = 0.0;
+    profile.mark_dirty();
+}
+
+pub fn flush_crown_progress_on_exit(
+    mut exits: MessageReader<bevy::app::AppExit>,
+    mut state: ResMut<DominanceState>,
+    mut profile: ResMut<Profile>,
+    run_stats: Res<RunStats>,
+    player_stats: Query<&CombatStats, With<Player>>,
+) {
+    if exits.read().next().is_none() {
+        return;
+    }
+    commit_crown_progress(&mut state, &mut profile);
+    if run_stats.time_alive > profile.data.records.longest_life_secs {
+        profile.data.records.longest_life_secs = run_stats.time_alive;
+        profile.mark_dirty();
+    }
+    if let Ok(stats) = player_stats.single()
+        && stats.life_score > profile.data.records.best_life_score
+    {
+        profile.data.records.best_life_score = stats.life_score;
+        profile.mark_dirty();
+    }
+    let _ = profile.save();
 }
 
 pub fn update_leader_indicator(
@@ -520,60 +600,111 @@ pub fn update_profile_progress(
     tracker.match_deaths = stats.deaths;
     tracker.shape_kills = shape_kills.0;
 
-    let records = &mut profile.data.records;
-    records.lifetime_kills = records.lifetime_kills.saturating_add(kill_delta);
-    records.lifetime_deaths = records.lifetime_deaths.saturating_add(death_delta);
-    records.shapes_destroyed = records.shapes_destroyed.saturating_add(shape_delta);
-    records.best_life_score = records.best_life_score.max(stats.life_score);
-    records.longest_life_secs = records.longest_life_secs.max(run_stats.time_alive);
-    records.best_life_kills = records.best_life_kills.max(life_kills);
-    records.highest_level = records.highest_level.max(level.0);
-    if evolution.current_kind.is_level_five() {
-        records
+    let records = &profile.data.records;
+    let evolution_is_new = evolution.current_kind.is_level_five()
+        && !records
             .used_level_five_evolutions
-            .insert(evolution.current_kind.id().to_string());
-    }
-    if kill_delta > 0 || death_delta > 0 || shape_delta > 0 {
+            .contains(evolution.current_kind.id());
+    let record_changed = kill_delta > 0
+        || death_delta > 0
+        || shape_delta > 0
+        || stats.life_score > records.best_life_score
+        || life_kills > records.best_life_kills
+        || level.0 > records.highest_level
+        || evolution_is_new
+        || (run_stats.time_alive > records.longest_life_secs
+            && (death_delta > 0 || run_stats.time_alive - records.longest_life_secs >= 5.0));
+    if record_changed {
+        let records = &mut profile.data.records;
+        records.lifetime_kills = records.lifetime_kills.saturating_add(kill_delta);
+        records.lifetime_deaths = records.lifetime_deaths.saturating_add(death_delta);
+        records.shapes_destroyed = records.shapes_destroyed.saturating_add(shape_delta);
+        records.best_life_score = records.best_life_score.max(stats.life_score);
+        records.longest_life_secs = records.longest_life_secs.max(run_stats.time_alive);
+        records.best_life_kills = records.best_life_kills.max(life_kills);
+        records.highest_level = records.highest_level.max(level.0);
+        if evolution_is_new {
+            records
+                .used_level_five_evolutions
+                .insert(evolution.current_kind.id().to_string());
+        }
         profile.mark_dirty();
     }
     if death_delta > 0 {
         tracker.life_start_kills = stats.kills;
     }
 
-    if profile.data.records.shapes_destroyed >= 10 {
+    if profile.data.records.shapes_destroyed >= 10
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::ShapeHunter)
+    {
         unlock(&mut profile, AchievementId::ShapeHunter, &mut achievements);
     }
-    if profile.data.records.lifetime_kills >= 1 {
+    if profile.data.records.lifetime_kills >= 1
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::FirstKill)
+    {
         unlock(&mut profile, AchievementId::FirstKill, &mut achievements);
     }
-    if level.0 >= 5 {
+    if evolution.current_kind != crate::evolution::EvolutionKind::Tank
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::FirstEvolution)
+    {
         unlock(
             &mut profile,
             AchievementId::FirstEvolution,
             &mut achievements,
         );
     }
-    if run_stats.time_alive >= 300.0 {
+    if run_stats.time_alive >= 300.0
+        && !profile.data.achievements.contains(&AchievementId::Survivor)
+    {
         unlock(&mut profile, AchievementId::Survivor, &mut achievements);
     }
-    if stats.life_score >= 1_000 {
+    if stats.life_score >= 1_000
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::ScoreThousand)
+    {
         unlock(
             &mut profile,
             AchievementId::ScoreThousand,
             &mut achievements,
         );
     }
-    if life_kills >= 5 {
+    if life_kills >= 5
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::FiveKillLife)
+    {
         unlock(&mut profile, AchievementId::FiveKillLife, &mut achievements);
     }
-    if level.0 >= 15 {
+    if evolution.current_kind.is_advanced()
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::AdvancedEvolution)
+    {
         unlock(
             &mut profile,
             AchievementId::AdvancedEvolution,
             &mut achievements,
         );
     }
-    if profile.data.records.used_level_five_evolutions.len() >= 8 {
+    if profile.data.records.used_level_five_evolutions.len() >= 8
+        && !profile
+            .data
+            .achievements
+            .contains(&AchievementId::EvolutionMastery)
+    {
         unlock(
             &mut profile,
             AchievementId::EvolutionMastery,
@@ -660,6 +791,11 @@ fn random_challenge_delay(rng: &mut Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn challenge_break_distance_has_outward_hysteresis() {
+        assert!(std::hint::black_box(CHALLENGE_BREAK_DISTANCE) > CHALLENGE_MAX_DISTANCE);
+    }
 
     #[test]
     fn crown_requires_one_living_positive_leader() {

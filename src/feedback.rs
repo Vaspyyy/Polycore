@@ -2,8 +2,9 @@ use crate::{
     dominance::DominanceState,
     enemy_bot::{EnemyBot, EnemyBotEvolution, EnemyBotVelocity},
     evolution::{EvolutionKind, EvolutionState, PassiveKind},
+    menu::GamePhase,
     passive::PassiveRuntime,
-    player::{Player, Velocity},
+    player::{MoveVelocity, Player, Velocity},
     tank::RecentDamage,
 };
 use bevy::prelude::*;
@@ -57,6 +58,9 @@ pub(crate) struct ShieldVisual;
 
 #[derive(Component)]
 pub(crate) struct ArmorArcVisual;
+
+#[derive(Component)]
+pub(crate) struct PassiveStatusText;
 
 #[derive(Resource, Clone)]
 pub(crate) struct PassiveVisualAssets {
@@ -119,6 +123,23 @@ pub fn setup_feedback(
         GlobalZIndex(45),
         Visibility::Hidden,
     ));
+    commands.spawn((
+        PassiveStatusText,
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(18.0),
+            bottom: Val::Px(18.0),
+            ..default()
+        },
+        Text::new(""),
+        TextFont {
+            font_size: FontSize::Px(13.0),
+            ..default()
+        },
+        TextColor(Color::srgba(0.66, 0.88, 1.0, 0.92)),
+        GlobalZIndex(45),
+        Visibility::Hidden,
+    ));
 }
 
 pub fn ensure_passive_visuals(
@@ -167,6 +188,85 @@ pub fn update_passive_visuals(
     }
 }
 
+pub fn update_passive_status(
+    phase: Res<GamePhase>,
+    evolution: Res<EvolutionState>,
+    player: Query<(&PassiveRuntime, &MoveVelocity), With<Player>>,
+    mut status: Query<(&mut Text, &mut Visibility), With<PassiveStatusText>>,
+) {
+    let Ok((mut text, mut visibility)) = status.single_mut() else {
+        return;
+    };
+    if *phase != GamePhase::Playing {
+        *visibility = Visibility::Hidden;
+        return;
+    }
+    let Ok((runtime, velocity)) = player.single() else {
+        *visibility = Visibility::Hidden;
+        return;
+    };
+    let label = match evolution.passive() {
+        PassiveKind::None => String::new(),
+        PassiveKind::MinigunSpin => {
+            format!("SPIN {:>3}%", (runtime.sustained_fire / 1.5 * 100.0) as u32)
+        }
+        PassiveKind::Stabilized => format!(
+            "STABILIZER {:>3}%",
+            (runtime.stationary / 0.75 * 100.0).clamp(0.0, 100.0) as u32
+        ),
+        PassiveKind::HunterMark => format!("MARK FOLLOW-UPS {}", runtime.follow_up_hits),
+        PassiveKind::ConsecutiveHits => format!("NEEDLER STACKS {}/5", runtime.stacks),
+        PassiveKind::HitSpeed => format!("HIT BOOST {:.1}s", runtime.speed_boost),
+        PassiveKind::Entrenched => format!(
+            "ENTRENCH {:>3}%{}",
+            (runtime.stationary / 1.25 * 100.0).clamp(0.0, 100.0) as u32,
+            if runtime.firing { "  HOLD FIRE" } else { "" }
+        ),
+        PassiveKind::FrontalShield => {
+            format!(
+                "FRONTAL SHIELD {:.0}/{:.0}",
+                runtime.shield, runtime.shield_max
+            )
+        }
+        PassiveKind::MomentumArmor => format!("MOMENTUM {:.0}", velocity.0.length()),
+        PassiveKind::AlternatingPairs => format!(
+            "VOLLEY PAIR {}",
+            if runtime.volley_phase { "B" } else { "A" }
+        ),
+        passive => passive_name(passive).to_string(),
+    };
+    let visible = !label.is_empty();
+    if **text != label {
+        **text = label;
+    }
+    *visibility = if visible {
+        Visibility::Visible
+    } else {
+        Visibility::Hidden
+    };
+}
+
+fn passive_name(passive: PassiveKind) -> &'static str {
+    match passive {
+        PassiveKind::DistanceDamage => "DISTANCE DAMAGE",
+        PassiveKind::Splash => "SPLASH",
+        PassiveKind::RearKnockback => "REAR KNOCKBACK",
+        PassiveKind::FrontalArmor => "FRONTAL ARMOR",
+        PassiveKind::PhasedFan => "PHASED FAN",
+        PassiveKind::BoosterRecoil => "BOOSTER RECOIL",
+        PassiveKind::None
+        | PassiveKind::MinigunSpin
+        | PassiveKind::Stabilized
+        | PassiveKind::HunterMark
+        | PassiveKind::AlternatingPairs
+        | PassiveKind::ConsecutiveHits
+        | PassiveKind::Entrenched
+        | PassiveKind::FrontalShield
+        | PassiveKind::MomentumArmor
+        | PassiveKind::HitSpeed => "",
+    }
+}
+
 fn set_passive_children(
     children: &Children,
     runtime: &PassiveRuntime,
@@ -181,7 +281,7 @@ fn set_passive_children(
         let Ok((mut visibility, shield, arc)) = visuals.get_mut(child) else {
             continue;
         };
-        *visibility =
+        let next =
             if (shield.is_some() && passive == PassiveKind::FrontalShield && runtime.shield > 0.0)
                 || (arc.is_some() && passive == PassiveKind::FrontalArmor)
             {
@@ -189,6 +289,9 @@ fn set_passive_children(
             } else {
                 Visibility::Hidden
             };
+        if *visibility != next {
+            *visibility = next;
+        }
     }
 }
 

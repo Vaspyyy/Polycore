@@ -1,5 +1,6 @@
 use crate::{
-    combat::{CombatDeathQueue, CombatStats, CombatantId},
+    ability::{ActiveAbilityState, ProjectileAbility, Slowed},
+    combat::{CombatDeathQueue, CombatStats, CombatantId, LifeGeneration},
     constants,
     enemy_bot::{
         EnemyBot, EnemyBotBrain, EnemyBotDamageCooldown, EnemyBotEvolution, EnemyBotHealth,
@@ -13,9 +14,9 @@ use crate::{
     passive::{PassiveRuntime, body_damage_multiplier, is_frontal_hit},
     player::{DamageCooldown, MoveVelocity, Player, PlayerHealth, Velocity},
     projectile::{
-        Projectile, ProjectileDamage, ProjectileEvolution, ProjectileHitHistory,
-        ProjectileKnockback, ProjectileOwner, ProjectilePenetration, ProjectileRear,
-        ProjectileSplashReady, ProjectileTravel,
+        Projectile, ProjectileDamage, ProjectileEvolution, ProjectileGeneration,
+        ProjectileHitHistory, ProjectileKnockback, ProjectileOwner, ProjectilePenetration,
+        ProjectileRadius, ProjectileRear, ProjectileSplashReady, ProjectileTravel,
     },
     rng::Rng,
     shape::{
@@ -30,14 +31,37 @@ const SPLASH_RADIUS: f32 = 90.0;
 
 #[derive(Component, Clone, Copy)]
 pub struct PendingSplash {
-    position: Vec2,
-    owner: ProjectileOwner,
-    direct_target: Entity,
-    damage: f32,
+    pub(crate) position: Vec2,
+    pub(crate) owner: ProjectileOwner,
+    pub(crate) generation: u32,
+    pub(crate) direct_target: Entity,
+    pub(crate) damage: f32,
+    pub(crate) radius: f32,
+    pub(crate) falloff_multiplier: f32,
 }
 
-fn splash_damage(base_damage: f32, distance: f32) -> f32 {
-    base_damage * 0.65 * (1.0 - distance / SPLASH_RADIUS).clamp(0.0, 1.0)
+fn splash_damage(base_damage: f32, distance: f32, radius: f32, multiplier: f32) -> f32 {
+    base_damage * multiplier * (1.0 - distance / radius).clamp(0.0, 1.0)
+}
+
+fn projectile_source_effects(
+    runtime: &mut PassiveRuntime,
+    ability_state: &mut ActiveAbilityState,
+    projectile_evolution: crate::evolution::EvolutionKind,
+    target: Entity,
+    travel: f32,
+    projectile_ability: Option<&ProjectileAbility>,
+) -> (f32, bool) {
+    if projectile_ability.is_some_and(|ability| ability.reflected) {
+        return (1.0, false);
+    }
+    let multiplier = runtime.projectile_hit_multiplier(projectile_evolution, target, travel);
+    let pinning = projectile_ability.is_some_and(|ability| ability.pinning)
+        && ability_state.consume_pinning_hit();
+    if pinning {
+        runtime.stack_timer = runtime.stack_timer.max(3.0);
+    }
+    (multiplier, pinning)
 }
 
 pub fn check_collisions(
@@ -49,9 +73,15 @@ pub fn check_collisions(
             &Transform,
             &ProjectileOwner,
             &ProjectileDamage,
+            &ProjectileRadius,
             &ProjectileKnockback,
+            &ProjectileEvolution,
+            &ProjectileTravel,
+            &ProjectileGeneration,
+            &mut ProjectileSplashReady,
             &mut ProjectilePenetration,
             &mut ProjectileHitHistory,
+            Option<&ProjectileAbility>,
         ),
         (With<Projectile>, Without<Player>),
     >,
@@ -62,13 +92,20 @@ pub fn check_collisions(
             &mut Health,
             &XpValue,
             &mut ShapeVelocity,
+            &ShapeKind,
+            Option<&crate::hotspot::HotspotShape>,
         ),
         With<Shape>,
     >,
     mut xp: ResMut<Xp>,
     mut total_xp: ResMut<TotalXp>,
     mut player_shape_kills: ResMut<crate::dominance::PlayerShapeKills>,
-    mut player_stats: Query<(&mut CombatStats, &PlayerHealth), (With<Player>, Without<EnemyBot>)>,
+    mut hotspot_kills: ResMut<crate::hotspot::HotspotShapeKillProgress>,
+    mut player_stats: Query<&mut CombatStats, (With<Player>, Without<EnemyBot>)>,
+    player_generation: Query<&LifeGeneration, (With<Player>, Without<EnemyBot>)>,
+    bot_generations: Query<&LifeGeneration, (With<EnemyBot>, Without<Player>)>,
+    mut player_runtime: Query<&mut PassiveRuntime, (With<Player>, Without<EnemyBot>)>,
+    mut bot_runtimes: Query<&mut PassiveRuntime, (With<EnemyBot>, Without<Player>)>,
     mut rng: ResMut<Rng>,
     mut bot_progress: Query<
         (
@@ -78,36 +115,69 @@ pub fn check_collisions(
             &mut EnemyBotEvolution,
             &mut EnemyBotHealth,
             &EnemyBotPlaystyle,
+            &EnemyBotBrain,
             &mut CombatStats,
         ),
         (With<EnemyBot>, Without<Player>),
     >,
 ) {
-    let collision_dist = constants::PROJECTILE_RADIUS + constants::SHAPE_RADIUS;
-    let collision_dist_sq = collision_dist * collision_dist;
+    let mut nearby = Vec::new();
 
     for (
         proj_entity,
         proj_transform,
         projectile_owner,
         projectile_damage,
+        projectile_radius,
         projectile_knockback,
+        projectile_evolution,
+        travel,
+        projectile_generation,
+        mut splash_ready,
         mut penetration,
         mut hit_history,
+        projectile_ability,
     ) in projectiles.iter_mut()
     {
+        let owner_is_current = match *projectile_owner {
+            ProjectileOwner::Player => player_generation
+                .single()
+                .is_ok_and(|generation| projectile_generation.matches(generation)),
+            ProjectileOwner::EnemyBot(owner) => bot_generations
+                .get(owner)
+                .is_ok_and(|generation| projectile_generation.matches(generation)),
+        };
+        if !owner_is_current {
+            commands.entity(proj_entity).despawn();
+            continue;
+        }
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
             continue;
         }
 
+        if projectile_evolution.0 == crate::evolution::EvolutionKind::Sentry {
+            continue;
+        }
         let proj_pos = proj_transform.translation.xy();
-        for candidate in grid.nearby(proj_pos, collision_dist) {
-            if candidate.kind != crate::spatial::SpatialKind::Shape {
-                continue;
-            }
-            let Ok((shape_entity, shape_pos, mut health, xp_val, mut velocity)) =
-                shapes.get_mut(candidate.entity)
+        let collision_dist = projectile_radius.0 + constants::SHAPE_RADIUS;
+        let collision_dist_sq = collision_dist * collision_dist;
+        grid.nearby_kind_into(
+            proj_pos,
+            collision_dist,
+            crate::spatial::SpatialKind::Shape,
+            &mut nearby,
+        );
+        for candidate in nearby.iter().copied() {
+            let Ok((
+                shape_entity,
+                shape_pos,
+                mut health,
+                xp_val,
+                mut velocity,
+                shape_kind,
+                hotspot_shape,
+            )) = shapes.get_mut(candidate.entity)
             else {
                 continue;
             };
@@ -121,20 +191,58 @@ pub fn check_collisions(
                 if !hit_history.record(shape_entity) {
                     continue;
                 }
+                let source_multiplier =
+                    if projectile_ability.is_some_and(|ability| ability.reflected) {
+                        1.0
+                    } else {
+                        match *projectile_owner {
+                            ProjectileOwner::Player => {
+                                player_runtime.single_mut().map_or(1.0, |mut runtime| {
+                                    runtime.projectile_hit_multiplier(
+                                        projectile_evolution.0,
+                                        shape_entity,
+                                        travel.0,
+                                    )
+                                })
+                            }
+                            ProjectileOwner::EnemyBot(owner) => {
+                                bot_runtimes.get_mut(owner).map_or(1.0, |mut runtime| {
+                                    runtime.projectile_hit_multiplier(
+                                        projectile_evolution.0,
+                                        shape_entity,
+                                        travel.0,
+                                    )
+                                })
+                            }
+                        }
+                    };
                 let knockback_dir = (shape_pos.translation.xy() - proj_pos).normalize_or_zero();
                 velocity.0 +=
                     knockback_dir * constants::SHAPE_KNOCKBACK_SPEED * projectile_knockback.0;
-                if apply_shape_damage(&mut health, projectile_damage.0) {
+                if splash_ready.0 {
+                    commands.spawn(PendingSplash {
+                        position: proj_pos,
+                        owner: *projectile_owner,
+                        generation: projectile_generation.0,
+                        direct_target: shape_entity,
+                        damage: projectile_damage.0 * source_multiplier,
+                        radius: splash_radius(projectile_evolution.0),
+                        falloff_multiplier: splash_multiplier(projectile_evolution.0),
+                    });
+                    splash_ready.0 = false;
+                }
+                if apply_shape_damage(&mut health, projectile_damage.0 * source_multiplier) {
                     commands.entity(shape_entity).despawn();
                     match *projectile_owner {
                         ProjectileOwner::Player => {
-                            if let Ok((mut stats, health)) = player_stats.single_mut()
-                                && health.current > 0.0
-                            {
+                            if let Ok(mut stats) = player_stats.single_mut() {
                                 xp.0 += xp_val.0;
                                 total_xp.0 += xp_val.0;
                                 stats.life_score = stats.life_score.saturating_add(xp_val.0);
                                 player_shape_kills.0 = player_shape_kills.0.saturating_add(1);
+                                if hotspot_shape.is_some() && shape_kind.sides >= 5 {
+                                    hotspot_kills.0 = hotspot_kills.0.saturating_add(1);
+                                }
                             }
                         }
                         ProjectileOwner::EnemyBot(bot_entity) => {
@@ -145,6 +253,7 @@ pub fn check_collisions(
                                 mut bot_evolution,
                                 mut bot_health,
                                 playstyle,
+                                brain,
                                 mut stats,
                             )) = bot_progress.get_mut(bot_entity)
                             {
@@ -156,6 +265,7 @@ pub fn check_collisions(
                                     &mut bot_evolution,
                                     &mut bot_health,
                                     playstyle,
+                                    brain.adaptive_evolution_tag(),
                                     &mut stats,
                                     &mut rng,
                                 );
@@ -179,24 +289,32 @@ pub fn check_projectile_enemy_bot_collisions(
     grid: Res<crate::spatial::SpatialGrid>,
     mut deaths: ResMut<CombatDeathQueue>,
     player_entity: Query<Entity, With<Player>>,
+    player_generation: Query<&LifeGeneration, (With<Player>, Without<EnemyBot>)>,
+    bot_generations: Query<&LifeGeneration, (With<EnemyBot>, Without<Player>)>,
     mut projectiles: Query<
         (
             Entity,
             &Transform,
             &ProjectileOwner,
             &ProjectileDamage,
+            &ProjectileRadius,
             &ProjectileKnockback,
             &Velocity,
             &ProjectileEvolution,
             &ProjectileTravel,
             &ProjectileRear,
+            &ProjectileGeneration,
             &mut ProjectileSplashReady,
             &mut ProjectilePenetration,
             &mut ProjectileHitHistory,
+            Option<&ProjectileAbility>,
         ),
         With<Projectile>,
     >,
-    mut player_runtime: Query<&mut PassiveRuntime, (With<Player>, Without<EnemyBot>)>,
+    mut player_runtime: Query<
+        (&mut PassiveRuntime, &mut ActiveAbilityState),
+        (With<Player>, Without<EnemyBot>),
+    >,
     mut bots: ParamSet<(
         Query<
             (
@@ -213,59 +331,122 @@ pub fn check_projectile_enemy_bot_collisions(
                 &EnemyBotEvolution,
                 &EnemyBotUpgrades,
                 &mut PassiveRuntime,
+                &mut ActiveAbilityState,
+                &mut Slowed,
             ),
             With<EnemyBot>,
         >,
-        Query<&mut PassiveRuntime, With<EnemyBot>>,
+        Query<(&mut PassiveRuntime, &mut ActiveAbilityState), With<EnemyBot>>,
     )>,
 ) {
+    let mut nearby = Vec::new();
     for (
         proj_entity,
         proj_transform,
         projectile_owner,
         projectile_damage,
+        projectile_radius,
         projectile_knockback,
         projectile_velocity,
         projectile_evolution,
         travel,
         rear,
+        projectile_generation,
         mut splash_ready,
         mut penetration,
         mut hit_history,
+        projectile_ability,
     ) in projectiles.iter_mut()
     {
+        let owner_is_current = match *projectile_owner {
+            ProjectileOwner::Player => player_generation
+                .single()
+                .is_ok_and(|generation| projectile_generation.matches(generation)),
+            ProjectileOwner::EnemyBot(owner) => bot_generations
+                .get(owner)
+                .is_ok_and(|generation| projectile_generation.matches(generation)),
+        };
+        if !owner_is_current {
+            commands.entity(proj_entity).despawn();
+            continue;
+        }
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
             continue;
         }
 
         let proj_pos = proj_transform.translation.xy();
-        for candidate in grid.nearby(proj_pos, constants::PROJECTILE_RADIUS + 25.0) {
-            if candidate.kind != crate::spatial::SpatialKind::Tank {
+        grid.nearby_kind_into(
+            proj_pos,
+            projectile_radius.0 + 25.0,
+            crate::spatial::SpatialKind::Tank,
+            &mut nearby,
+        );
+        for candidate in nearby.iter().copied() {
+            let target_is_valid = {
+                let target_query = bots.p0();
+                target_query.get(candidate.entity).is_ok_and(
+                    |(
+                        entity,
+                        transform,
+                        health,
+                        _,
+                        _,
+                        _,
+                        _,
+                        _,
+                        protection,
+                        _,
+                        evolution,
+                        _,
+                        _,
+                        _,
+                        _,
+                    )| {
+                        health.current > 0.0
+                            && !protection.active()
+                            && !matches!(
+                                *projectile_owner,
+                                ProjectileOwner::EnemyBot(owner) if owner == entity
+                            )
+                            && proj_pos.distance_squared(transform.translation.xy())
+                                < (projectile_radius.0 + crate::tank::radius(&evolution.0)).powi(2)
+                    },
+                )
+            };
+            if !target_is_valid || !hit_history.record(candidate.entity) {
                 continue;
             }
-            let source_multiplier = match *projectile_owner {
-                ProjectileOwner::Player => {
-                    player_runtime.single_mut().map_or(1.0, |mut runtime| {
-                        runtime.projectile_hit_multiplier(
-                            crate::evolution::definition(projectile_evolution.0).passive,
+            let (source_multiplier, pinning_hit) = match *projectile_owner {
+                ProjectileOwner::Player => player_runtime.single_mut().map_or(
+                    (1.0, false),
+                    |(mut runtime, mut ability_state)| {
+                        projectile_source_effects(
+                            &mut runtime,
+                            &mut ability_state,
+                            projectile_evolution.0,
                             candidate.entity,
                             travel.0,
+                            projectile_ability,
                         )
-                    })
-                }
-                ProjectileOwner::EnemyBot(owner) => {
-                    bots.p1().get_mut(owner).map_or(1.0, |mut runtime| {
-                        runtime.projectile_hit_multiplier(
-                            crate::evolution::definition(projectile_evolution.0).passive,
+                    },
+                ),
+                ProjectileOwner::EnemyBot(owner) => bots.p1().get_mut(owner).map_or(
+                    (1.0, false),
+                    |(mut runtime, mut ability_state)| {
+                        projectile_source_effects(
+                            &mut runtime,
+                            &mut ability_state,
+                            projectile_evolution.0,
                             candidate.entity,
                             travel.0,
+                            projectile_ability,
                         )
-                    })
-                }
+                    },
+                ),
             };
             let mut target_query = bots.p0();
-            let Ok((
+            if let Ok((
                 bot_entity,
                 bot_transform,
                 mut health,
@@ -274,35 +455,15 @@ pub fn check_projectile_enemy_bot_collisions(
                 mut visibility,
                 mut respawn_timer,
                 mut brain,
-                protection,
+                _,
                 mut recent_damage,
                 bot_evolution,
                 bot_upgrades,
                 mut passive_runtime,
+                mut ability_state,
+                mut slowed,
             )) = target_query.get_mut(candidate.entity)
-            else {
-                continue;
-            };
-            if health.current <= 0.0 {
-                continue;
-            }
-            if let ProjectileOwner::EnemyBot(owner) = *projectile_owner
-                && owner == bot_entity
             {
-                continue;
-            }
-            if protection.active() {
-                continue;
-            }
-
-            let collision_dist =
-                constants::PROJECTILE_RADIUS + crate::tank::radius(&bot_evolution.0);
-            let collision_dist_sq = collision_dist * collision_dist;
-            let dist_sq = proj_pos.distance_squared(bot_transform.translation.xy());
-            if dist_sq < collision_dist_sq {
-                if !hit_history.record(bot_entity) {
-                    continue;
-                }
                 let (attacker, killer) = match *projectile_owner {
                     ProjectileOwner::Player => {
                         (player_entity.single().ok(), Some(CombatantId::Player))
@@ -312,31 +473,49 @@ pub fn check_projectile_enemy_bot_collisions(
                     }
                 };
                 if let Some(attacker) = attacker {
-                    brain.note_attacker(attacker);
+                    brain.note_projectile_attacker(attacker, travel.0);
                 }
                 let speed_fraction = move_velocity.0.length()
                     / (bot_upgrades.0.movement_speed() * bot_evolution.0.movement_multiplier())
                         .max(1.0);
-                let frontal =
-                    is_frontal_hit(bot_transform, projectile_velocity.0, 50.0_f32.to_radians());
-                let applied_damage = passive_runtime.incoming_damage(
-                    bot_evolution.0.passive(),
-                    projectile_damage.0 * source_multiplier,
-                    frontal,
-                    speed_fraction,
+                let frontal = is_frontal_hit(
+                    bot_transform,
+                    projectile_velocity.0,
+                    if ability_state.shield_wall_active() {
+                        60.0_f32.to_radians()
+                    } else {
+                        50.0_f32.to_radians()
+                    },
                 );
+                let active_damage_multiplier = ability_state.damage_multiplier();
+                let applied_damage = ability_state.absorb_shield_wall(
+                    passive_runtime.incoming_damage(
+                        bot_evolution.0.current_kind,
+                        projectile_damage.0 * source_multiplier,
+                        frontal,
+                        speed_fraction,
+                    ) * active_damage_multiplier,
+                    frontal,
+                );
+                if pinning_hit {
+                    slowed.amount = (slowed.amount + 0.06).min(0.30);
+                    slowed.remaining = 3.0;
+                }
                 recent_damage.record(applied_damage);
                 let knockback_dir = (bot_transform.translation.xy() - proj_pos).normalize_or_zero();
                 velocity.0 += knockback_dir
                     * constants::PLAYER_COLLISION_KNOCKBACK_SPEED
                     * projectile_knockback.0
-                    * if rear.0 { 1.8 } else { 1.0 };
+                    * rear_knockback_multiplier(projectile_evolution.0, rear.0);
                 if splash_ready.0 {
                     commands.spawn(PendingSplash {
                         position: proj_pos,
                         owner: *projectile_owner,
+                        generation: projectile_generation.0,
                         direct_target: bot_entity,
                         damage: projectile_damage.0 * source_multiplier,
+                        radius: splash_radius(projectile_evolution.0),
+                        falloff_multiplier: splash_multiplier(projectile_evolution.0),
                     });
                     splash_ready.0 = false;
                 }
@@ -375,14 +554,17 @@ pub fn check_projectile_player_collisions(
             &Transform,
             &ProjectileOwner,
             &ProjectileDamage,
+            &ProjectileRadius,
             &ProjectileKnockback,
             &Velocity,
             &ProjectileEvolution,
             &ProjectileTravel,
             &ProjectileRear,
+            &ProjectileGeneration,
             &mut ProjectileSplashReady,
             &mut ProjectilePenetration,
             &mut ProjectileHitHistory,
+            Option<&ProjectileAbility>,
         ),
         (With<Projectile>, Without<Player>),
     >,
@@ -396,11 +578,20 @@ pub fn check_projectile_player_collisions(
             &SpawnProtection,
             &mut RecentDamage,
             &mut PassiveRuntime,
+            &mut ActiveAbilityState,
+            &mut Slowed,
         ),
         (With<Player>, Without<EnemyBot>),
     >,
     bot_names: Query<&EnemyBotName, With<EnemyBot>>,
-    mut bot_runtimes: Query<&mut PassiveRuntime, (With<EnemyBot>, Without<Player>)>,
+    mut bot_runtimes: Query<
+        (
+            &mut PassiveRuntime,
+            &mut ActiveAbilityState,
+            &LifeGeneration,
+        ),
+        (With<EnemyBot>, Without<Player>),
+    >,
 ) {
     let Ok((
         player_entity,
@@ -411,6 +602,8 @@ pub fn check_projectile_player_collisions(
         protection,
         mut recent_damage,
         mut player_runtime,
+        mut ability_state,
+        mut slowed,
     )) = player.single_mut()
     else {
         return;
@@ -421,8 +614,6 @@ pub fn check_projectile_player_collisions(
     if protection.active() {
         return;
     }
-    let collision_dist = constants::PROJECTILE_RADIUS + crate::tank::radius(&evolution);
-    let collision_dist_sq = collision_dist * collision_dist;
     let player_pos = player_transform.translation.xy();
 
     for (
@@ -430,25 +621,37 @@ pub fn check_projectile_player_collisions(
         proj_transform,
         projectile_owner,
         projectile_damage,
+        projectile_radius,
         projectile_knockback,
         projectile_velocity,
         projectile_evolution,
         travel,
         rear,
+        projectile_generation,
         mut splash_ready,
         mut penetration,
         mut hit_history,
+        projectile_ability,
     ) in projectiles.iter_mut()
     {
         let ProjectileOwner::EnemyBot(owner) = *projectile_owner else {
             continue;
         };
+        if !bot_runtimes
+            .get(owner)
+            .is_ok_and(|(_, _, generation)| projectile_generation.matches(generation))
+        {
+            commands.entity(proj_entity).despawn();
+            continue;
+        }
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
             continue;
         }
 
         let proj_pos = proj_transform.translation.xy();
+        let collision_dist = projectile_radius.0 + crate::tank::radius(&evolution);
+        let collision_dist_sq = collision_dist * collision_dist;
         if proj_pos.distance_squared(player_pos) >= collision_dist_sq {
             continue;
         }
@@ -456,37 +659,58 @@ pub fn check_projectile_player_collisions(
             continue;
         }
 
-        let source_multiplier = bot_runtimes.get_mut(owner).map_or(1.0, |mut runtime| {
-            runtime.projectile_hit_multiplier(
-                crate::evolution::definition(projectile_evolution.0).passive,
-                player_entity,
-                travel.0,
-            )
-        });
+        let (source_multiplier, pinning_hit) = bot_runtimes.get_mut(owner).map_or(
+            (1.0, false),
+            |(mut runtime, mut source_ability, _)| {
+                projectile_source_effects(
+                    &mut runtime,
+                    &mut source_ability,
+                    projectile_evolution.0,
+                    player_entity,
+                    travel.0,
+                    projectile_ability,
+                )
+            },
+        );
         let speed_fraction = player_move_velocity.0.length()
             / (upgrades.movement_speed() * evolution.movement_multiplier()).max(1.0);
         let frontal = is_frontal_hit(
             player_transform,
             projectile_velocity.0,
-            50.0_f32.to_radians(),
+            if ability_state.shield_wall_active() {
+                60.0_f32.to_radians()
+            } else {
+                50.0_f32.to_radians()
+            },
         );
-        let applied_damage = player_runtime.incoming_damage(
-            evolution.passive(),
-            projectile_damage.0 * source_multiplier,
+        let active_damage_multiplier = ability_state.damage_multiplier();
+        let applied_damage = ability_state.absorb_shield_wall(
+            player_runtime.incoming_damage(
+                evolution.current_kind,
+                projectile_damage.0 * source_multiplier,
+                frontal,
+                speed_fraction,
+            ) * active_damage_multiplier,
             frontal,
-            speed_fraction,
         );
+        if pinning_hit {
+            slowed.amount = (slowed.amount + 0.06).min(0.30);
+            slowed.remaining = 3.0;
+        }
         let knockback_dir = (player_pos - proj_pos).normalize_or_zero();
         player_velocity.0 += knockback_dir
             * constants::PLAYER_COLLISION_KNOCKBACK_SPEED
             * projectile_knockback.0
-            * if rear.0 { 1.8 } else { 1.0 };
+            * rear_knockback_multiplier(projectile_evolution.0, rear.0);
         if splash_ready.0 {
             commands.spawn(PendingSplash {
                 position: proj_pos,
                 owner: *projectile_owner,
+                generation: projectile_generation.0,
                 direct_target: player_entity,
                 damage: projectile_damage.0 * source_multiplier,
+                radius: splash_radius(projectile_evolution.0),
+                falloff_multiplier: splash_multiplier(projectile_evolution.0),
             });
             splash_ready.0 = false;
         }
@@ -514,6 +738,118 @@ pub fn check_projectile_player_collisions(
 }
 
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+pub fn resolve_pending_shape_splashes(
+    mut commands: Commands,
+    splashes: Query<&PendingSplash>,
+    player_generation: Query<&LifeGeneration, (With<Player>, Without<EnemyBot>)>,
+    bot_generations: Query<&LifeGeneration, (With<EnemyBot>, Without<Player>)>,
+    mut shapes: Query<
+        (
+            Entity,
+            &Transform,
+            &mut Health,
+            &XpValue,
+            &ShapeKind,
+            Option<&crate::hotspot::HotspotShape>,
+        ),
+        With<Shape>,
+    >,
+    mut xp: ResMut<Xp>,
+    mut total_xp: ResMut<TotalXp>,
+    mut player_shape_kills: ResMut<crate::dominance::PlayerShapeKills>,
+    mut hotspot_kills: ResMut<crate::hotspot::HotspotShapeKillProgress>,
+    mut player_stats: Query<&mut CombatStats, (With<Player>, Without<EnemyBot>)>,
+    mut bot_progress: Query<
+        (
+            &mut EnemyBotXp,
+            &mut EnemyBotLevel,
+            &mut EnemyBotUpgrades,
+            &mut EnemyBotEvolution,
+            &mut EnemyBotHealth,
+            &EnemyBotPlaystyle,
+            &EnemyBotBrain,
+            &mut CombatStats,
+        ),
+        (With<EnemyBot>, Without<Player>),
+    >,
+    mut rng: ResMut<Rng>,
+) {
+    for splash in &splashes {
+        let owner_is_current = match splash.owner {
+            ProjectileOwner::Player => player_generation
+                .single()
+                .is_ok_and(|generation| generation.0 == splash.generation),
+            ProjectileOwner::EnemyBot(owner) => bot_generations
+                .get(owner)
+                .is_ok_and(|generation| generation.0 == splash.generation),
+        };
+        if !owner_is_current {
+            continue;
+        }
+        for (entity, transform, mut health, xp_value, shape_kind, hotspot_shape) in &mut shapes {
+            if entity == splash.direct_target || health.0 <= 0.0 {
+                continue;
+            }
+            let distance = transform.translation.xy().distance(splash.position);
+            if distance >= splash.radius {
+                continue;
+            }
+            if !apply_shape_damage(
+                &mut health,
+                splash_damage(
+                    splash.damage,
+                    distance,
+                    splash.radius,
+                    splash.falloff_multiplier,
+                ),
+            ) {
+                continue;
+            }
+            commands.entity(entity).despawn();
+            match splash.owner {
+                ProjectileOwner::Player => {
+                    if let Ok(mut stats) = player_stats.single_mut() {
+                        xp.0 = xp.0.saturating_add(xp_value.0);
+                        total_xp.0 = total_xp.0.saturating_add(xp_value.0);
+                        stats.life_score = stats.life_score.saturating_add(xp_value.0);
+                        player_shape_kills.0 = player_shape_kills.0.saturating_add(1);
+                        if hotspot_shape.is_some() && shape_kind.sides >= 5 {
+                            hotspot_kills.0 = hotspot_kills.0.saturating_add(1);
+                        }
+                    }
+                }
+                ProjectileOwner::EnemyBot(owner) => {
+                    if let Ok((
+                        mut bot_xp,
+                        mut bot_level,
+                        mut bot_upgrades,
+                        mut bot_evolution,
+                        mut bot_health,
+                        playstyle,
+                        brain,
+                        mut stats,
+                    )) = bot_progress.get_mut(owner)
+                    {
+                        award_enemy_bot_xp(
+                            xp_value.0,
+                            &mut bot_xp,
+                            &mut bot_level,
+                            &mut bot_upgrades,
+                            &mut bot_evolution,
+                            &mut bot_health,
+                            playstyle,
+                            brain.adaptive_evolution_tag(),
+                            &mut stats,
+                            &mut rng,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn resolve_pending_splashes(
     mut commands: Commands,
     splashes: Query<(Entity, &PendingSplash)>,
@@ -526,6 +862,8 @@ pub fn resolve_pending_splashes(
     player_upgrades: Res<UpgradeState>,
     mut death_summary: ResMut<DeathSummary>,
     bot_names: Query<&EnemyBotName, With<EnemyBot>>,
+    player_generation: Query<&LifeGeneration, (With<Player>, Without<EnemyBot>)>,
+    bot_generations: Query<&LifeGeneration, (With<EnemyBot>, Without<Player>)>,
     mut player: Query<
         (
             Entity,
@@ -557,6 +895,18 @@ pub fn resolve_pending_splashes(
     >,
 ) {
     for (splash_entity, splash) in &splashes {
+        let owner_is_current = match splash.owner {
+            ProjectileOwner::Player => player_generation
+                .single()
+                .is_ok_and(|generation| generation.0 == splash.generation),
+            ProjectileOwner::EnemyBot(owner) => bot_generations
+                .get(owner)
+                .is_ok_and(|generation| generation.0 == splash.generation),
+        };
+        if !owner_is_current {
+            commands.entity(splash_entity).despawn();
+            continue;
+        }
         let killer = match splash.owner {
             ProjectileOwner::Player => Some(CombatantId::Player),
             ProjectileOwner::EnemyBot(owner) => Some(CombatantId::EnemyBot(owner)),
@@ -581,13 +931,18 @@ pub fn resolve_pending_splashes(
             && !protection.active()
         {
             let distance = transform.translation.xy().distance(splash.position);
-            if distance < SPLASH_RADIUS {
+            if distance < splash.radius {
                 let speed_fraction = move_velocity.0.length()
                     / (player_upgrades.movement_speed() * player_evolution.movement_multiplier())
                         .max(1.0);
                 let damage = runtime.incoming_damage(
-                    player_evolution.passive(),
-                    splash_damage(splash.damage, distance),
+                    player_evolution.current_kind,
+                    splash_damage(
+                        splash.damage,
+                        distance,
+                        splash.radius,
+                        splash.falloff_multiplier,
+                    ),
                     false,
                     speed_fraction,
                 );
@@ -634,14 +989,19 @@ pub fn resolve_pending_splashes(
                 continue;
             }
             let distance = transform.translation.xy().distance(splash.position);
-            if distance >= SPLASH_RADIUS {
+            if distance >= splash.radius {
                 continue;
             }
             let speed_fraction = move_velocity.0.length()
                 / (upgrades.0.movement_speed() * evolution.0.movement_multiplier()).max(1.0);
             let damage = runtime.incoming_damage(
-                evolution.0.passive(),
-                splash_damage(splash.damage, distance),
+                evolution.0.current_kind,
+                splash_damage(
+                    splash.damage,
+                    distance,
+                    splash.radius,
+                    splash.falloff_multiplier,
+                ),
                 false,
                 speed_fraction,
             );
@@ -663,6 +1023,37 @@ pub fn resolve_pending_splashes(
     }
 }
 
+fn rear_knockback_multiplier(evolution: crate::evolution::EvolutionKind, rear: bool) -> f32 {
+    if rear
+        && crate::evolution::definition(evolution).passive
+            == crate::evolution::PassiveKind::RearKnockback
+    {
+        if evolution == crate::evolution::EvolutionKind::Rearguard {
+            2.25
+        } else {
+            1.8
+        }
+    } else {
+        1.0
+    }
+}
+
+fn splash_radius(evolution: crate::evolution::EvolutionKind) -> f32 {
+    if evolution == crate::evolution::EvolutionKind::Siegebreaker {
+        110.0
+    } else {
+        SPLASH_RADIUS
+    }
+}
+
+fn splash_multiplier(evolution: crate::evolution::EvolutionKind) -> f32 {
+    if evolution == crate::evolution::EvolutionKind::Siegebreaker {
+        0.70
+    } else {
+        0.65
+    }
+}
+
 pub fn check_player_shape_collisions(
     mut commands: Commands,
     time: Res<Time<Fixed>>,
@@ -674,8 +1065,10 @@ pub fn check_player_shape_collisions(
     mut xp: ResMut<Xp>,
     mut total_xp: ResMut<TotalXp>,
     mut player_shape_kills: ResMut<crate::dominance::PlayerShapeKills>,
+    mut hotspot_kills: ResMut<crate::hotspot::HotspotShapeKillProgress>,
     level: Res<crate::shape::Level>,
     mut death_summary: ResMut<DeathSummary>,
+    player_ability: Query<&ActiveAbilityState, With<Player>>,
     mut player: Query<
         (
             &mut Transform,
@@ -700,6 +1093,7 @@ pub fn check_player_shape_collisions(
             &mut Health,
             &mut ShapeContactCooldown,
             &XpValue,
+            Option<&crate::hotspot::HotspotShape>,
         ),
         (With<Shape>, Without<Player>),
     >,
@@ -729,7 +1123,13 @@ pub fn check_player_shape_collisions(
     let speed_fraction = move_velocity.0.length()
         / (upgrades.movement_speed() * evolution.movement_multiplier()).max(1.0);
     let body_damage = crate::tank::body_damage(upgrades.body_damage(), &evolution)
-        * body_damage_multiplier(evolution.passive(), speed_fraction);
+        * body_damage_multiplier(evolution.current_kind, speed_fraction)
+        * player_ability
+            .single()
+            .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
+    let active_damage_multiplier = player_ability
+        .single()
+        .map_or(1.0, ActiveAbilityState::damage_multiplier);
     let dt = time.delta_secs();
 
     for (
@@ -741,6 +1141,7 @@ pub fn check_player_shape_collisions(
         mut shape_health,
         mut shape_contact_cooldown,
         xp_value,
+        hotspot_shape,
     ) in shapes.iter_mut()
     {
         let player_pos = player_transform.translation.xy();
@@ -789,10 +1190,10 @@ pub fn check_player_shape_collisions(
         }
         let damage_to_shape = crate::tank::contact_damage_for_step(body_damage, dt);
         let damage_to_player = passive_runtime.incoming_contact_damage(
-            evolution.passive(),
+            evolution.current_kind,
             crate::tank::contact_damage_for_step(shape_damage.0, dt),
             speed_fraction,
-        );
+        ) * active_damage_multiplier;
         let shape_killed = apply_shape_damage(&mut shape_health, damage_to_shape);
         let player_killed = apply_player_damage(&mut player_health, damage_to_player);
         recent_damage.record(damage_to_player);
@@ -804,6 +1205,9 @@ pub fn check_player_shape_collisions(
             total_xp.0 += xp_value.0;
             stats.life_score = stats.life_score.saturating_add(xp_value.0);
             player_shape_kills.0 = player_shape_kills.0.saturating_add(1);
+            if hotspot_shape.is_some() && shape_kind.sides >= 5 {
+                hotspot_kills.0 = hotspot_kills.0.saturating_add(1);
+            }
         }
         if player_killed {
             death_summary.killed_by = shape_kind.name().to_string();
@@ -828,6 +1232,8 @@ pub fn check_player_enemy_bot_collisions(
     total_xp: Res<TotalXp>,
     level: Res<crate::shape::Level>,
     mut death_summary: ResMut<DeathSummary>,
+    player_ability: Query<&ActiveAbilityState, (With<Player>, Without<EnemyBot>)>,
+    bot_abilities: Query<&ActiveAbilityState, (With<EnemyBot>, Without<Player>)>,
     mut player: Query<
         (
             Entity,
@@ -944,21 +1350,31 @@ pub fn check_player_enemy_bot_collisions(
             let bot_speed_fraction = bot_move_velocity.0.length()
                 / (bot_upgrades.0.movement_speed() * bot_evolution.0.movement_multiplier())
                     .max(1.0);
-            let player_body_damage =
-                body_damage * body_damage_multiplier(evolution.passive(), player_speed_fraction);
+            let player_body_damage = body_damage
+                * body_damage_multiplier(evolution.current_kind, player_speed_fraction)
+                * player_ability
+                    .single()
+                    .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
             let damage_to_bot = bot_runtime.incoming_contact_damage(
-                bot_evolution.0.passive(),
+                bot_evolution.0.current_kind,
                 crate::tank::contact_damage_for_step(player_body_damage, dt),
                 bot_speed_fraction,
-            );
+            ) * bot_abilities
+                .get(bot_entity)
+                .map_or(1.0, ActiveAbilityState::damage_multiplier);
             let bot_body_damage =
                 crate::tank::body_damage(bot_upgrades.0.body_damage(), &bot_evolution.0)
-                    * body_damage_multiplier(bot_evolution.0.passive(), bot_speed_fraction);
+                    * body_damage_multiplier(bot_evolution.0.current_kind, bot_speed_fraction)
+                    * bot_abilities
+                        .get(bot_entity)
+                        .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
             let damage_to_player = player_runtime.incoming_contact_damage(
-                evolution.passive(),
+                evolution.current_kind,
                 crate::tank::contact_damage_for_step(bot_body_damage, dt),
                 player_speed_fraction,
-            );
+            ) * player_ability
+                .single()
+                .map_or(1.0, ActiveAbilityState::damage_multiplier);
             bot_brain.note_attacker(player_entity);
             bot_recent_damage.record(damage_to_bot);
             player_recent_damage.record(damage_to_player);
@@ -995,7 +1411,9 @@ pub fn check_enemy_bot_shape_collisions(
     grid: Res<crate::spatial::SpatialGrid>,
     mut rng: ResMut<Rng>,
     mut deaths: ResMut<CombatDeathQueue>,
+    abilities: Query<&ActiveAbilityState, With<EnemyBot>>,
     mut bot_passives: Query<(&EnemyBotMoveVelocity, &mut PassiveRuntime), With<EnemyBot>>,
+    bot_brains: Query<&EnemyBotBrain, With<EnemyBot>>,
     mut bots: Query<
         (
             Entity,
@@ -1030,6 +1448,7 @@ pub fn check_enemy_bot_shape_collisions(
     >,
 ) {
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
+    let mut nearby = Vec::new();
 
     for (
         bot_entity,
@@ -1063,10 +1482,13 @@ pub fn check_enemy_bot_shape_collisions(
         let collision_distance = bot_radius + constants::SHAPE_RADIUS;
         let collision_distance_sq = collision_distance * collision_distance;
         let bot_half = constants::arena_half_extent() - bot_radius;
-        for candidate in grid.nearby(bot_transform.translation.xy(), collision_distance) {
-            if candidate.kind != crate::spatial::SpatialKind::Shape {
-                continue;
-            }
+        grid.nearby_kind_into(
+            bot_transform.translation.xy(),
+            collision_distance,
+            crate::spatial::SpatialKind::Shape,
+            &mut nearby,
+        );
+        for candidate in nearby.iter().copied() {
             let Ok((
                 shape_entity,
                 mut shape_transform,
@@ -1119,14 +1541,19 @@ pub fn check_enemy_bot_shape_collisions(
             }
             let body_damage =
                 crate::tank::body_damage(bot_upgrades.0.body_damage(), &bot_evolution.0)
-                    * body_damage_multiplier(bot_evolution.0.passive(), speed_fraction);
+                    * body_damage_multiplier(bot_evolution.0.current_kind, speed_fraction)
+                    * abilities
+                        .get(bot_entity)
+                        .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
             let damage_to_shape =
                 crate::tank::contact_damage_for_step(body_damage, time.delta_secs());
             let damage_to_bot = passive_runtime.incoming_contact_damage(
-                bot_evolution.0.passive(),
+                bot_evolution.0.current_kind,
                 crate::tank::contact_damage_for_step(shape_damage.0, time.delta_secs()),
                 speed_fraction,
-            );
+            ) * abilities
+                .get(bot_entity)
+                .map_or(1.0, ActiveAbilityState::damage_multiplier);
             let shape_killed = apply_shape_damage(&mut shape_health, damage_to_shape);
             let bot_killed = apply_enemy_bot_damage(&mut bot_health, damage_to_bot);
             recent_damage.record(damage_to_bot);
@@ -1142,6 +1569,10 @@ pub fn check_enemy_bot_shape_collisions(
                     &mut bot_evolution,
                     &mut bot_health,
                     playstyle,
+                    bot_brains
+                        .get(bot_entity)
+                        .ok()
+                        .and_then(EnemyBotBrain::adaptive_evolution_tag),
                     &mut stats,
                     &mut rng,
                 );
@@ -1164,6 +1595,7 @@ pub fn check_enemy_bot_enemy_bot_collisions(
     time: Res<Time<Fixed>>,
     grid: Res<crate::spatial::SpatialGrid>,
     mut deaths: ResMut<CombatDeathQueue>,
+    abilities: Query<&ActiveAbilityState, With<EnemyBot>>,
     mut bots: Query<
         (
             Entity,
@@ -1185,7 +1617,9 @@ pub fn check_enemy_bot_enemy_bot_collisions(
     >,
 ) {
     let dt = time.delta_secs();
-    for (candidate_a, candidate_b) in grid.unique_pairs(150.0) {
+    for (candidate_a, candidate_b) in
+        grid.unique_pairs_of_kind(150.0, crate::spatial::SpatialKind::Tank)
+    {
         let Ok(
             [
                 (
@@ -1255,19 +1689,29 @@ pub fn check_enemy_bot_enemy_bot_collisions(
                     / (upgrades_b.0.movement_speed() * evolution_b.0.movement_multiplier())
                         .max(1.0);
                 let body_a = crate::tank::body_damage(upgrades_a.0.body_damage(), &evolution_a.0)
-                    * body_damage_multiplier(evolution_a.0.passive(), speed_a);
+                    * body_damage_multiplier(evolution_a.0.current_kind, speed_a)
+                    * abilities
+                        .get(entity_a)
+                        .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
                 let body_b = crate::tank::body_damage(upgrades_b.0.body_damage(), &evolution_b.0)
-                    * body_damage_multiplier(evolution_b.0.passive(), speed_b);
+                    * body_damage_multiplier(evolution_b.0.current_kind, speed_b)
+                    * abilities
+                        .get(entity_b)
+                        .map_or(1.0, ActiveAbilityState::body_damage_multiplier);
                 let damage_a = runtime_a.incoming_contact_damage(
-                    evolution_a.0.passive(),
+                    evolution_a.0.current_kind,
                     crate::tank::contact_damage_for_step(body_b, dt),
                     speed_a,
-                );
+                ) * abilities
+                    .get(entity_a)
+                    .map_or(1.0, ActiveAbilityState::damage_multiplier);
                 let damage_b = runtime_b.incoming_contact_damage(
-                    evolution_b.0.passive(),
+                    evolution_b.0.current_kind,
                     crate::tank::contact_damage_for_step(body_a, dt),
                     speed_b,
-                );
+                ) * abilities
+                    .get(entity_b)
+                    .map_or(1.0, ActiveAbilityState::damage_multiplier);
                 brain_a.note_attacker(entity_b);
                 brain_b.note_attacker(entity_a);
                 recent_a.record(damage_a);
@@ -1323,7 +1767,9 @@ pub fn check_shape_shape_collisions(
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
     let mut dead_shapes = Vec::new();
 
-    for (candidate_a, candidate_b) in grid.unique_pairs(collision_distance) {
+    for (candidate_a, candidate_b) in
+        grid.unique_pairs_of_kind(collision_distance, crate::spatial::SpatialKind::Shape)
+    {
         let Ok(
             [
                 (entity_a, mut transform_a, mut health_a, mut velocity_a, mut cooldown_a),
@@ -1424,10 +1870,84 @@ mod tests {
 
     #[test]
     fn splash_falls_off_and_never_exceeds_direct_damage() {
-        let center = splash_damage(20.0, 0.0);
-        let edge = splash_damage(20.0, SPLASH_RADIUS);
+        let center = splash_damage(20.0, 0.0, SPLASH_RADIUS, 0.65);
+        let edge = splash_damage(20.0, SPLASH_RADIUS, SPLASH_RADIUS, 0.65);
         assert_eq!(center, 13.0);
         assert_eq!(edge, 0.0);
-        assert!(splash_damage(20.0, 45.0) < center);
+        assert!(splash_damage(20.0, 45.0, SPLASH_RADIUS, 0.65) < center);
+    }
+
+    #[test]
+    fn rear_knockback_is_exclusive_to_crossfire_passive() {
+        assert_eq!(
+            rear_knockback_multiplier(crate::evolution::EvolutionKind::Crossfire, true),
+            1.8
+        );
+        assert_eq!(
+            rear_knockback_multiplier(crate::evolution::EvolutionKind::Rearguard, true),
+            2.25
+        );
+        assert_eq!(
+            rear_knockback_multiplier(crate::evolution::EvolutionKind::Flanker, true),
+            1.0
+        );
+        assert_eq!(
+            rear_knockback_multiplier(crate::evolution::EvolutionKind::Crossfire, false),
+            1.0
+        );
+    }
+
+    #[test]
+    fn pinning_hits_consume_six_hit_budget_and_hold_stack_timer() {
+        let mut runtime = PassiveRuntime::default();
+        let mut ability = ActiveAbilityState {
+            kind: Some(crate::ability::ActiveAbilityKind::PinningBurst),
+            prime_remaining: 5.0,
+            charges: 6,
+            ..default()
+        };
+        let projectile_ability = ProjectileAbility {
+            pinning: true,
+            ..default()
+        };
+        let (_, pinning) = projectile_source_effects(
+            &mut runtime,
+            &mut ability,
+            crate::evolution::EvolutionKind::Impaler,
+            Entity::from_bits(42),
+            100.0,
+            Some(&projectile_ability),
+        );
+        assert!(pinning);
+        assert_eq!(ability.charges, 5);
+        assert_eq!(runtime.stack_timer, 3.0);
+    }
+
+    #[test]
+    fn reflected_shots_do_not_apply_the_original_owners_passive() {
+        let mut runtime = PassiveRuntime::default();
+        let mut ability = ActiveAbilityState {
+            kind: Some(crate::ability::ActiveAbilityKind::PinningBurst),
+            prime_remaining: 5.0,
+            charges: 6,
+            ..default()
+        };
+        let projectile_ability = ProjectileAbility {
+            pinning: true,
+            reflected: true,
+            ..default()
+        };
+        let (multiplier, pinning) = projectile_source_effects(
+            &mut runtime,
+            &mut ability,
+            crate::evolution::EvolutionKind::Impaler,
+            Entity::from_bits(43),
+            100.0,
+            Some(&projectile_ability),
+        );
+        assert_eq!(multiplier, 1.0);
+        assert!(!pinning);
+        assert_eq!(ability.charges, 6);
+        assert_eq!(runtime.stack_timer, 0.0);
     }
 }

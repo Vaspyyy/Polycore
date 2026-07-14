@@ -17,6 +17,9 @@ pub struct PaletteNameText;
 #[derive(Component)]
 pub struct ProfileRecordsText;
 
+#[derive(Component)]
+pub struct AchievementProgressText;
+
 pub fn setup_profile_panel(mut commands: Commands) {
     commands
         .spawn((
@@ -26,7 +29,7 @@ pub fn setup_profile_panel(mut commands: Commands) {
                 left: Val::Percent(50.0),
                 bottom: Val::Px(18.0),
                 width: Val::Px(610.0),
-                height: Val::Px(86.0),
+                height: Val::Px(106.0),
                 flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Center,
                 justify_content: JustifyContent::Center,
@@ -87,6 +90,16 @@ pub fn setup_profile_panel(mut commands: Commands) {
                     ..default()
                 },
             ));
+            panel.spawn((
+                AchievementProgressText,
+                Text::new("NEXT ACHIEVEMENT"),
+                TextFont {
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(Color::srgba(0.66, 0.72, 0.84, 1.0)),
+                TextLayout::new(Justify::Center, LineBreak::NoWrap),
+            ));
         });
 }
 
@@ -146,6 +159,14 @@ pub fn update_profile_panel(
     profile: Res<Profile>,
     mut palette_text: Query<&mut Text, With<PaletteNameText>>,
     mut records_text: Query<&mut Text, (With<ProfileRecordsText>, Without<PaletteNameText>)>,
+    mut achievement_text: Query<
+        &mut Text,
+        (
+            With<AchievementProgressText>,
+            Without<PaletteNameText>,
+            Without<ProfileRecordsText>,
+        ),
+    >,
 ) {
     if !profile.is_changed() {
         return;
@@ -171,4 +192,80 @@ pub fn update_profile_panel(
             AchievementId::ALL.len(),
         );
     }
+    if let Ok(mut text) = achievement_text.single_mut() {
+        **text = next_achievement_progress(&profile);
+    }
+}
+
+fn next_achievement_progress(profile: &Profile) -> String {
+    let records = &profile.data.records;
+    let progress = |achievement| match achievement {
+        AchievementId::ShapeHunter => (records.shapes_destroyed, 10, "destroy shapes"),
+        AchievementId::FirstKill => (records.lifetime_kills, 1, "defeat a tank"),
+        AchievementId::FirstEvolution => (
+            u32::from(!records.used_level_five_evolutions.is_empty()),
+            1,
+            "choose a level 5 evolution",
+        ),
+        AchievementId::ClaimCrown => (
+            u32::from(records.total_crown_time_secs > 0.0),
+            1,
+            "claim the crown",
+        ),
+        AchievementId::CrownThirty => (
+            records.best_crown_streak_secs as u32,
+            30,
+            "hold the crown (seconds)",
+        ),
+        AchievementId::Survivor => (records.longest_life_secs as u32, 300, "survive (seconds)"),
+        AchievementId::ScoreThousand => (records.best_life_score, 1_000, "score in one life"),
+        AchievementId::FiveKillLife => (records.best_life_kills, 5, "kills in one life"),
+        AchievementId::AdvancedEvolution => (0, 1, "choose a level 15 evolution"),
+        AchievementId::CrownOneTwenty => (
+            records.best_crown_streak_secs as u32,
+            120,
+            "hold the crown (seconds)",
+        ),
+        AchievementId::EvolutionMastery => (
+            records.used_level_five_evolutions.len() as u32,
+            8,
+            "use distinct level 5 evolutions",
+        ),
+        AchievementId::FinalForm => (
+            u32::from(!records.used_level_thirty_evolutions.is_empty()),
+            1,
+            "reach a level 30 capstone",
+        ),
+        AchievementId::FullArsenal => (
+            records.used_level_thirty_evolutions.len() as u32,
+            16,
+            "reach all level 30 capstones",
+        ),
+        AchievementId::RichVein => (
+            records.hotspot_high_tier_shapes_destroyed,
+            100,
+            "destroy hotspot pentagons or hexagons",
+        ),
+        AchievementId::HoldTheZone => (
+            records.hotspots_survived,
+            1,
+            "survive a hotspot from its opening",
+        ),
+    };
+
+    let Some((achievement, (current, target, requirement))) = AchievementId::ALL
+        .into_iter()
+        .filter(|achievement| !profile.data.achievements.contains(achievement))
+        .map(|achievement| (achievement, progress(achievement)))
+        .max_by(|(_, a), (_, b)| (a.0 as f32 / a.1 as f32).total_cmp(&(b.0 as f32 / b.1 as f32)))
+    else {
+        return "ALL ACHIEVEMENTS UNLOCKED".to_string();
+    };
+    format!(
+        "NEXT {}: {}/{} — {}",
+        achievement.title(),
+        current.min(target),
+        target,
+        requirement
+    )
 }

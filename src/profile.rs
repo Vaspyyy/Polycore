@@ -8,7 +8,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const PROFILE_VERSION: u32 = 1;
+const PROFILE_VERSION: u32 = 2;
+const DEFAULT_PROFILE_JSON: &str = include_str!("../config/default-profile.json");
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -29,6 +30,9 @@ pub struct RecordData {
     pub best_life_kills: u32,
     pub highest_level: u32,
     pub used_level_five_evolutions: BTreeSet<String>,
+    pub used_level_thirty_evolutions: BTreeSet<String>,
+    pub hotspot_high_tier_shapes_destroyed: u32,
+    pub hotspots_survived: u32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -62,10 +66,14 @@ pub enum AchievementId {
     AdvancedEvolution,
     CrownOneTwenty,
     EvolutionMastery,
+    FinalForm,
+    FullArsenal,
+    RichVein,
+    HoldTheZone,
 }
 
 impl AchievementId {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 15] = [
         Self::ShapeHunter,
         Self::FirstKill,
         Self::FirstEvolution,
@@ -77,6 +85,10 @@ impl AchievementId {
         Self::AdvancedEvolution,
         Self::CrownOneTwenty,
         Self::EvolutionMastery,
+        Self::FinalForm,
+        Self::FullArsenal,
+        Self::RichVein,
+        Self::HoldTheZone,
     ];
 
     pub fn title(self) -> &'static str {
@@ -92,11 +104,31 @@ impl AchievementId {
             Self::AdvancedEvolution => "Apex",
             Self::CrownOneTwenty => "Sovereign",
             Self::EvolutionMastery => "Versatile",
+            Self::FinalForm => "Final Form",
+            Self::FullArsenal => "Full Arsenal",
+            Self::RichVein => "Rich Vein",
+            Self::HoldTheZone => "Hold the Zone",
         }
     }
 
     pub fn palette(self) -> PaletteId {
-        PaletteId::ALL[self as usize + 1]
+        match self {
+            Self::ShapeHunter => PaletteId::CircuitMint,
+            Self::FirstKill => PaletteId::Ember,
+            Self::FirstEvolution => PaletteId::Aurora,
+            Self::ClaimCrown => PaletteId::CrownGold,
+            Self::CrownThirty => PaletteId::SignalOrange,
+            Self::Survivor => PaletteId::Verdant,
+            Self::ScoreThousand => PaletteId::RoyalViolet,
+            Self::FiveKillLife => PaletteId::NeonLime,
+            Self::AdvancedEvolution => PaletteId::Obsidian,
+            Self::CrownOneTwenty => PaletteId::ApexWhite,
+            Self::EvolutionMastery => PaletteId::Spectrum,
+            Self::FinalForm => PaletteId::IonCyan,
+            Self::FullArsenal => PaletteId::CommandCrimson,
+            Self::RichVein => PaletteId::HazardAmber,
+            Self::HoldTheZone => PaletteId::EnduranceViolet,
+        }
     }
 }
 
@@ -141,14 +173,18 @@ impl Profile {
     }
 
     fn load_from(path: Option<PathBuf>, legacy: Option<PathBuf>) -> Self {
-        let mut data = path.as_deref().and_then(read_profile).unwrap_or_default();
+        let mut data = path
+            .as_deref()
+            .and_then(read_profile)
+            .unwrap_or_else(default_profile_data);
+        let needs_migration = data.version < PROFILE_VERSION;
         data.version = PROFILE_VERSION;
         data.unlocked_palettes.insert(PaletteId::CoreBlue);
         if !data.unlocked_palettes.contains(&data.selected_palette) {
             data.selected_palette = PaletteId::CoreBlue;
         }
 
-        let mut dirty = false;
+        let mut dirty = needs_migration;
         if data.identity.player_name.is_empty()
             && let Some(name_path) = legacy.as_deref()
             && let Ok(name) = fs::read_to_string(name_path)
@@ -192,11 +228,16 @@ impl Profile {
         self.dirty = true;
     }
 
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     pub fn save(&mut self) -> std::io::Result<()> {
         if !self.dirty {
             return Ok(());
         }
         let Some(path) = self.path.as_deref() else {
+            self.dirty = false;
             return Ok(());
         };
         write_profile(path, &self.data)?;
@@ -206,7 +247,17 @@ impl Profile {
 }
 
 pub fn flush_profile(mut profile: ResMut<Profile>) {
-    let _ = profile.save();
+    if profile.is_dirty() {
+        let _ = profile.save();
+    }
+}
+
+fn default_profile_data() -> ProfileData {
+    fs::read_to_string(Path::new("config").join("default-profile.json"))
+        .ok()
+        .and_then(|contents| serde_json::from_str(&contents).ok())
+        .or_else(|| serde_json::from_str(DEFAULT_PROFILE_JSON).ok())
+        .unwrap_or_default()
 }
 
 fn read_profile(path: &Path) -> Option<ProfileData> {
@@ -309,5 +360,61 @@ mod tests {
         assert_eq!(recovered.data.version, PROFILE_VERSION);
         assert!(path.with_extension("corrupt.json").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn packaged_default_profile_is_used_for_new_profiles() {
+        let profile = Profile::load_from(None, None);
+        assert_eq!(profile.data.version, PROFILE_VERSION);
+        assert_eq!(profile.data.settings.screen_shake, 0.35);
+        assert!(profile.data.settings.damage_indicators);
+        assert!(!profile.is_dirty());
+    }
+
+    #[test]
+    fn version_one_profile_receives_version_two_record_defaults() {
+        let root = test_path("profile-v1");
+        let path = root.join("profile.json");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            &path,
+            r#"{
+                "version": 1,
+                "identity": { "player_name": "Veteran" },
+                "records": { "lifetime_kills": 12 },
+                "achievements": [],
+                "unlocked_palettes": ["CoreBlue"],
+                "selected_palette": "CoreBlue",
+                "settings": {}
+            }"#,
+        )
+        .unwrap();
+
+        let profile = Profile::load_from(Some(path), None);
+        assert_eq!(profile.data.version, 2);
+        assert_eq!(profile.data.records.lifetime_kills, 12);
+        assert!(profile.data.records.used_level_thirty_evolutions.is_empty());
+        assert_eq!(profile.data.records.hotspot_high_tier_shapes_destroyed, 0);
+        assert_eq!(profile.data.records.hotspots_survived, 0);
+        assert!(profile.is_dirty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn achievement_palette_mapping_is_explicit_and_unique() {
+        let palettes = AchievementId::ALL.map(AchievementId::palette);
+        let unique = palettes.into_iter().collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), AchievementId::ALL.len());
+        assert_eq!(AchievementId::FinalForm.palette(), PaletteId::IonCyan);
+        assert_eq!(
+            AchievementId::FullArsenal.palette(),
+            PaletteId::CommandCrimson
+        );
+        assert_eq!(AchievementId::RichVein.palette(), PaletteId::HazardAmber);
+        assert_eq!(
+            AchievementId::HoldTheZone.palette(),
+            PaletteId::EnduranceViolet
+        );
     }
 }

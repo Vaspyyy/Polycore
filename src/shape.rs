@@ -145,7 +145,7 @@ pub fn shape_spawn(
     time: Res<Time>,
     mut rng: ResMut<Rng>,
     mut timer: ResMut<SpawnTimer>,
-    shapes: Query<(), With<Shape>>,
+    shapes: Query<(), (With<Shape>, Without<crate::hotspot::HotspotShape>)>,
     player: Query<(&Transform, &PlayerHealth), With<Player>>,
     bots: Query<(&Transform, &EnemyBotHealth), With<EnemyBot>>,
 ) {
@@ -175,19 +175,24 @@ pub fn shape_spawn(
 
     let roll = rng.next(100);
     let sides = shape_sides_for_roll(roll);
+    spawn_shape(&mut commands, &assets, sides, spawn_pos);
+}
+
+pub fn spawn_shape(
+    commands: &mut Commands,
+    assets: &ShapeAssets,
+    sides: u32,
+    spawn_pos: Vec2,
+) -> Entity {
     let hp = constants::shape_health(sides);
-    let xp = constants::shape_xp(sides);
-    let damage = constants::shape_damage(sides);
-
     let asset_index = (sides - 3) as usize;
-
     commands
         .spawn((
             Shape,
             Health(hp),
             MaxHealth(hp),
-            XpValue(xp),
-            ShapeDamage(damage),
+            XpValue(constants::shape_xp(sides)),
+            ShapeDamage(constants::shape_damage(sides)),
             ShapeKind { sides },
             ShapeVelocity::default(),
             ShapeContactCooldown::default(),
@@ -215,7 +220,8 @@ pub fn shape_spawn(
                 Transform::from_xyz(0.0, constants::SHAPE_HEALTH_BAR_OFFSET_Y, 3.0),
                 Visibility::Hidden,
             ));
-        });
+        })
+        .id()
 }
 
 fn random_spawn_position(player_pos: Vec2, rng: &mut Rng) -> Vec2 {
@@ -333,7 +339,10 @@ pub fn shape_knockback_update(
 }
 
 pub fn update_shape_health_bars(
-    shapes: Query<(&Health, &MaxHealth, &Children), With<Shape>>,
+    shapes: Query<
+        (&Health, &MaxHealth, &Children),
+        (With<Shape>, Or<(Changed<Health>, Changed<MaxHealth>)>),
+    >,
     mut bars: Query<
         (
             &mut Transform,

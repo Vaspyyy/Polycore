@@ -7,6 +7,7 @@ pub struct PauseRoot;
 #[derive(Component, Clone, Copy)]
 pub enum SettingsAction {
     Resume,
+    ReturnToMenu,
     ShakeDown,
     ShakeUp,
     DamageIndicators,
@@ -80,6 +81,10 @@ pub fn setup_experience_ui(mut commands: Commands) {
                     SettingsAction::Fullscreen,
                 ));
                 panel.spawn(action_button("Resume", SettingsAction::Resume));
+                panel.spawn(action_button(
+                    "Return to menu",
+                    SettingsAction::ReturnToMenu,
+                ));
             });
         });
 }
@@ -243,8 +248,16 @@ pub fn handle_settings_buttons(
         if *interaction != Interaction::Pressed {
             continue;
         }
+        let mut settings_changed = true;
         match action {
-            SettingsAction::Resume => *phase = GamePhase::Playing,
+            SettingsAction::Resume => {
+                *phase = GamePhase::Playing;
+                settings_changed = false;
+            }
+            SettingsAction::ReturnToMenu => {
+                *phase = GamePhase::Menu;
+                settings_changed = false;
+            }
             SettingsAction::ShakeDown => profile.data.settings.screen_shake -= 0.1,
             SettingsAction::ShakeUp => profile.data.settings.screen_shake += 0.1,
             SettingsAction::DamageIndicators => {
@@ -254,8 +267,10 @@ pub fn handle_settings_buttons(
                 profile.data.settings.fullscreen = !profile.data.settings.fullscreen;
             }
         }
-        profile.data.settings.screen_shake = profile.data.settings.screen_shake.clamp(0.0, 1.0);
-        profile.mark_dirty();
+        if settings_changed {
+            profile.data.settings.screen_shake = profile.data.settings.screen_shake.clamp(0.0, 1.0);
+            profile.mark_dirty();
+        }
     }
 }
 

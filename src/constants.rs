@@ -15,7 +15,7 @@ pub const PLAYER_COLOR: [f32; 4] = [0.2, 0.6, 1.0, 1.0];
 
 // Shooting
 pub const SHOOT_COOLDOWN: f32 = 0.6;
-pub const PROJECTILE_RADIUS: f32 = 4.0;
+pub const PROJECTILE_RADIUS: f32 = 4.8;
 pub const PROJECTILE_SPEED: f32 = 400.0;
 pub const PROJECTILE_LIFETIME: f32 = 2.0;
 
@@ -150,7 +150,9 @@ mod tests {
     fn progression_telemetry_hits_evolution_targets() {
         let level_five = progression_telemetry_seconds(5);
         let level_fifteen = progression_telemetry_seconds(15);
+        let level_thirty = progression_telemetry_seconds(30);
         assert!((144.0..=216.0).contains(&level_five));
         assert!((720.0..=1080.0).contains(&level_fifteen));
+        assert!((1800.0..=2400.0).contains(&level_thirty));
     }
 }

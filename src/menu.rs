@@ -80,7 +80,7 @@ pub struct DeathTankText;
 pub struct RetryButton;
 
 #[derive(Component)]
-pub struct ContinueButton;
+pub struct NewMatchButton;
 
 #[derive(Component)]
 pub struct NameField;
@@ -390,13 +390,13 @@ fn spawn_death_screen(commands: &mut Commands) {
                 buttons
                     .spawn((
                         Button,
-                        ContinueButton,
+                        NewMatchButton,
                         death_button_node(),
                         BackgroundColor(Color::srgba(0.13, 0.66, 0.82, 1.0)),
                         BorderColor::all(Color::srgba(0.10, 0.54, 0.67, 1.0)),
                     ))
                     .with_children(|continue_button| {
-                        continue_button.spawn(death_text("Continue", 24.0, true));
+                        continue_button.spawn(death_text("New Match", 24.0, true));
                     });
             });
         });
@@ -800,7 +800,7 @@ pub fn handle_death_buttons(
             &Interaction,
             &mut BackgroundColor,
             Option<&RetryButton>,
-            Option<&ContinueButton>,
+            Option<&NewMatchButton>,
         ),
         (Changed<Interaction>, With<Button>),
     >,
@@ -823,18 +823,22 @@ pub fn handle_death_buttons(
             &mut combat::CombatStats,
             &mut crate::tank::SpawnProtection,
             &mut crate::passive::PassiveRuntime,
+            &mut projectile::ShootCooldown,
+            &mut crate::tank::RecentDamage,
+            &mut combat::LifeGeneration,
+            &mut crate::ability::ActiveAbilityState,
         ),
         (With<player::Player>, Without<enemy_bot::EnemyBot>),
     >,
 ) {
-    for (interaction, mut color, retry, continue_button) in buttons.iter_mut() {
-        if retry.is_none() && continue_button.is_none() {
+    for (interaction, mut color, retry, new_match) in buttons.iter_mut() {
+        if retry.is_none() && new_match.is_none() {
             continue;
         }
 
         match *interaction {
             Interaction::Pressed => {
-                let full_world_reset = continue_button.is_some();
+                let full_world_reset = new_match.is_some();
                 reset_run(
                     &mut commands,
                     &mut run_stats,
@@ -901,6 +905,10 @@ fn reset_run(
             &mut combat::CombatStats,
             &mut crate::tank::SpawnProtection,
             &mut crate::passive::PassiveRuntime,
+            &mut projectile::ShootCooldown,
+            &mut crate::tank::RecentDamage,
+            &mut combat::LifeGeneration,
+            &mut crate::ability::ActiveAbilityState,
         ),
         (With<player::Player>, Without<enemy_bot::EnemyBot>),
     >,
@@ -912,6 +920,7 @@ fn reset_run(
     rng: &mut crate::rng::Rng,
 ) {
     if full_world_reset {
+        commands.insert_resource(crate::hotspot::HotspotState::default());
         for (entity, _) in shapes.iter() {
             commands.entity(entity).despawn();
         }
@@ -937,6 +946,10 @@ fn reset_run(
         mut combat_stats,
         mut protection,
         mut passive_runtime,
+        mut shoot_cooldown,
+        mut recent_damage,
+        mut generation,
+        mut ability_state,
     )) = player_query.single_mut()
     {
         let tank_positions = bots
@@ -974,6 +987,10 @@ fn reset_run(
         }
         protection.remaining = constants::SPAWN_PROTECTION_SECS;
         passive_runtime.reset_for_life();
+        shoot_cooldown.0 = 0.0;
+        *recent_damage = crate::tank::RecentDamage::default();
+        generation.0 = generation.0.wrapping_add(1);
+        ability_state.reset_for_life();
     }
 }
 

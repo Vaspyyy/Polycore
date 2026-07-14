@@ -1,3 +1,4 @@
+mod ability;
 mod collision;
 mod combat;
 mod constants;
@@ -7,6 +8,7 @@ mod enemy_bot_ai;
 mod evolution;
 mod experience;
 mod feedback;
+mod hotspot;
 mod hud;
 mod leaderboard;
 mod menu;
@@ -85,6 +87,7 @@ fn main() {
         .insert_resource(feedback::CameraShake::default())
         .add_message::<feedback::CombatFeedback>()
         .add_message::<dominance::AchievementUnlocked>()
+        .add_message::<ability::AbilityCast>()
         .configure_sets(
             FixedUpdate,
             (
@@ -106,7 +109,9 @@ fn main() {
                 palette::setup_palette_materials,
                 tank::setup_tank_assets,
                 projectile::setup_projectile_assets,
+                ability::setup_abilities,
                 shape::setup_shape_assets,
+                hotspot::setup_hotspot,
                 player::setup_player,
                 enemy_bot::setup_enemy_bots,
                 shape::setup_xp,
@@ -120,6 +125,19 @@ fn main() {
                 feedback::setup_feedback,
             )
                 .chain(),
+        )
+        .add_systems(
+            Update,
+            (
+                ability::player_ability_input,
+                ability::bot_ability_decisions,
+                ability::execute_ability_casts,
+                ability::tick_abilities,
+                ability::ensure_ability_rings,
+                ability::update_ability_presentation,
+            )
+                .chain()
+                .run_if(menu::is_simulating),
         )
         .add_systems(
             Update,
@@ -151,6 +169,7 @@ fn main() {
             (
                 feedback::ensure_passive_visuals,
                 feedback::update_passive_visuals,
+                feedback::update_passive_status,
                 feedback::detect_feedback,
                 feedback::consume_feedback,
                 feedback::update_feedback_effects,
@@ -166,6 +185,7 @@ fn main() {
                 enemy_bot::update_enemy_bot_health_bars,
                 profile_ui::handle_palette_buttons,
                 profile_ui::update_profile_panel,
+                hotspot::update_hotspot_presentation,
                 evolution::refresh_evolution_cards,
                 experience::handle_pause_input,
                 experience::handle_settings_buttons,
@@ -182,6 +202,7 @@ fn main() {
                 dominance::update_leader_indicator,
                 dominance::show_achievement_toasts,
                 dominance::tick_achievement_toasts,
+                dominance::flush_crown_progress_on_exit,
             )
                 .chain(),
         )
@@ -248,7 +269,11 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (shape::shape_knockback_update, projectile::projectile_update)
+            (
+                shape::shape_knockback_update,
+                projectile::projectile_update,
+                ability::update_constructs,
+            )
                 .in_set(SimulationSet::Movement)
                 .run_if(menu::is_simulating),
         )
@@ -262,15 +287,19 @@ fn main() {
             FixedUpdate,
             (
                 collision::check_enemy_bot_enemy_bot_collisions,
+                ability::resolve_projectile_manipulation,
                 collision::check_collisions,
                 collision::check_projectile_enemy_bot_collisions,
                 collision::check_projectile_player_collisions,
+                collision::resolve_pending_shape_splashes,
                 collision::resolve_pending_splashes,
                 collision::check_player_enemy_bot_collisions,
                 collision::check_player_shape_collisions,
                 collision::check_enemy_bot_shape_collisions,
                 collision::check_shape_shape_collisions,
+                ability::resolve_construct_collisions,
             )
+                .chain()
                 .in_set(SimulationSet::CollisionDamage)
                 .run_if(menu::is_simulating),
         )
@@ -282,7 +311,11 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (shape::shape_spawn, shape::check_level_up)
+            (
+                hotspot::update_hotspot,
+                shape::shape_spawn,
+                shape::check_level_up,
+            )
                 .in_set(SimulationSet::Progression)
                 .run_if(menu::is_simulating),
         )
@@ -351,6 +384,14 @@ fn camera_zoom(
     mut camera: Query<&mut Projection, With<Camera>>,
     mut vignette: Query<(&mut BackgroundGradient, &mut Visibility), With<ZoomVignette>>,
 ) {
+    let scroll_delta = match scroll.unit {
+        MouseScrollUnit::Line => scroll.delta.y,
+        MouseScrollUnit::Pixel => scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    };
+    if scroll_delta.abs() <= f32::EPSILON {
+        return;
+    }
+
     let Ok(mut projection) = camera.single_mut() else {
         return;
     };
@@ -358,21 +399,15 @@ fn camera_zoom(
         return;
     };
 
-    let scroll_delta = match scroll.unit {
-        MouseScrollUnit::Line => scroll.delta.y,
-        MouseScrollUnit::Pixel => scroll.delta.y / MouseScrollUnit::SCROLL_UNIT_CONVERSION_FACTOR,
+    let zoom_delta = -scroll_delta * constants::CAMERA_ZOOM_SPEED;
+    let resistance = if zoom_delta > 0.0 {
+        1.0 - zoom_warning_strength(orthographic.scale) * 0.72
+    } else {
+        1.0
     };
-    if scroll_delta.abs() > f32::EPSILON {
-        let zoom_delta = -scroll_delta * constants::CAMERA_ZOOM_SPEED;
-        let resistance = if zoom_delta > 0.0 {
-            1.0 - zoom_warning_strength(orthographic.scale) * 0.72
-        } else {
-            1.0
-        };
-        let zoom_factor = (zoom_delta * resistance).exp();
-        orthographic.scale = (orthographic.scale * zoom_factor)
-            .clamp(constants::CAMERA_MIN_ZOOM, constants::CAMERA_MAX_ZOOM);
-    }
+    let zoom_factor = (zoom_delta * resistance).exp();
+    orthographic.scale = (orthographic.scale * zoom_factor)
+        .clamp(constants::CAMERA_MIN_ZOOM, constants::CAMERA_MAX_ZOOM);
 
     let strength = zoom_warning_strength(orthographic.scale);
     for (mut gradient, mut visibility) in vignette.iter_mut() {
@@ -481,5 +516,36 @@ fn setup_grid(
             MeshMaterial2d(border_material.clone()),
             Transform::from_xyz(0.0, y, border_z),
         ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion_systems_initialize_without_query_aliases() {
+        let mut world = World::new();
+
+        let mut update = Schedule::default();
+        update.add_systems((
+            ability::player_ability_input,
+            ability::bot_ability_decisions,
+            ability::execute_ability_casts,
+            ability::tick_abilities,
+            ability::ensure_ability_rings,
+            ability::update_ability_presentation,
+            hotspot::update_hotspot_presentation,
+        ));
+        update.initialize(&mut world).unwrap();
+
+        let mut fixed = Schedule::default();
+        fixed.add_systems((
+            ability::update_constructs,
+            ability::resolve_projectile_manipulation,
+            ability::resolve_construct_collisions,
+            hotspot::update_hotspot,
+        ));
+        fixed.initialize(&mut world).unwrap();
     }
 }

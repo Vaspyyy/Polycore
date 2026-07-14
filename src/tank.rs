@@ -40,8 +40,10 @@ pub struct TankOutline;
 pub struct TankBodyAssets {
     circles: [Handle<Mesh>; 6],
     ram: Handle<Mesh>,
+    capstones: [Handle<Mesh>; 16],
     outlines: [Handle<Mesh>; 7],
     ram_outline: Handle<Mesh>,
+    capstone_outlines: [Handle<Mesh>; 16],
     outline_material: Handle<ColorMaterial>,
     guard_material: Handle<ColorMaterial>,
 }
@@ -55,11 +57,25 @@ pub fn setup_tank_assets(
     let circles = std::array::from_fn(|index| meshes.add(Circle::new(radii[index])));
     let outline_radii = [23.0, 23.8, 21.4, 22.2, 22.0, 27.6, 24.6];
     let outlines = std::array::from_fn(|index| meshes.add(Circle::new(outline_radii[index])));
+    let capstone_radii = [
+        20.0, 20.0, 20.8, 20.8, 20.0, 20.0, 18.4, 18.4, 27.5, 24.6, 19.2, 19.2, 24.6, 24.6, 19.0,
+        19.0,
+    ];
+    let capstones = std::array::from_fn(|index| {
+        let radius = capstone_radii[index];
+        meshes.add(RegularPolygon::new(radius, 5 + (index % 4) as u32))
+    });
+    let capstone_outlines = std::array::from_fn(|index| {
+        let radius = capstone_radii[index] + 3.0;
+        meshes.add(RegularPolygon::new(radius, 5 + (index % 4) as u32))
+    });
     commands.insert_resource(TankBodyAssets {
         circles,
         ram: meshes.add(RegularPolygon::new(24.6, 6)),
+        capstones,
         outlines,
         ram_outline: meshes.add(RegularPolygon::new(27.6, 6)),
+        capstone_outlines,
         outline_material: materials.add(Color::BLACK),
         guard_material: materials.add(Color::srgb(0.38, 0.22, 0.55)),
     });
@@ -67,6 +83,9 @@ pub fn setup_tank_assets(
 
 impl TankBodyAssets {
     fn body(&self, kind: EvolutionKind) -> Handle<Mesh> {
+        if let Some(index) = capstone_index(kind) {
+            return self.capstones[index].clone();
+        }
         match kind.base() {
             EvolutionKind::Cannon => self.circles[1].clone(),
             EvolutionKind::Sniper => self.circles[2].clone(),
@@ -78,6 +97,9 @@ impl TankBodyAssets {
         }
     }
     fn outline(&self, kind: EvolutionKind) -> Handle<Mesh> {
+        if let Some(index) = capstone_index(kind) {
+            return self.capstone_outlines[index].clone();
+        }
         match kind.base() {
             EvolutionKind::Cannon => self.outlines[1].clone(),
             EvolutionKind::Sniper => self.outlines[2].clone(),
@@ -88,6 +110,28 @@ impl TankBodyAssets {
             _ => self.outlines[0].clone(),
         }
     }
+}
+
+fn capstone_index(kind: EvolutionKind) -> Option<usize> {
+    Some(match kind {
+        EvolutionKind::Sentry => 0,
+        EvolutionKind::Emplacement => 1,
+        EvolutionKind::Siegebreaker => 2,
+        EvolutionKind::Lancer => 3,
+        EvolutionKind::Fusillade => 4,
+        EvolutionKind::Rearguard => 5,
+        EvolutionKind::Deadeye => 6,
+        EvolutionKind::Pursuer => 7,
+        EvolutionKind::Dreadnought => 8,
+        EvolutionKind::Vanguard => 9,
+        EvolutionKind::Bombardier => 10,
+        EvolutionKind::Impaler => 11,
+        EvolutionKind::Stronghold => 12,
+        EvolutionKind::Guardian => 13,
+        EvolutionKind::Afterburner => 14,
+        EvolutionKind::Ace => 15,
+        _ => return None,
+    })
 }
 
 pub fn update_tank_bodies(
@@ -107,11 +151,14 @@ pub fn update_tank_bodies(
             With<crate::enemy_bot::EnemyBot>,
             Without<crate::player::Player>,
             Without<TankOutline>,
+            Changed<crate::enemy_bot::EnemyBotEvolution>,
         ),
     >,
     mut outlines: Query<(&mut Mesh2d, &mut MeshMaterial2d<ColorMaterial>), With<TankOutline>>,
 ) {
-    if let Ok((mut body, children)) = players.single_mut() {
+    if player_evolution.is_changed()
+        && let Ok((mut body, children)) = players.single_mut()
+    {
         apply_body(
             &assets,
             player_evolution.current_kind,
@@ -165,6 +212,9 @@ pub struct ProjectileCorridor {
 }
 
 pub fn radius(evolution: &EvolutionState) -> f32 {
+    if evolution.current_kind == EvolutionKind::Dreadnought {
+        return 27.5;
+    }
     match evolution.current_kind.base() {
         EvolutionKind::Tank | EvolutionKind::Gunner | EvolutionKind::TwinBarrel => 20.0,
         EvolutionKind::Cannon => 20.8,

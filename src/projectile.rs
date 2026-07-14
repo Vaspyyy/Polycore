@@ -1,7 +1,8 @@
 use crate::{
+    combat::LifeGeneration,
     constants,
     evolution::{EvolutionKind, EvolutionState, PassiveKind},
-    hud::UpgradeState,
+    hud::{UpgradeKind, UpgradeState},
     passive::PassiveRuntime,
     player::{self, MoveVelocity, Player, Velocity},
     rng::Rng,
@@ -12,7 +13,7 @@ use bevy::prelude::*;
 #[derive(Component)]
 pub struct Projectile;
 
-#[derive(Component, Clone, Copy, PartialEq, Eq)]
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProjectileOwner {
     Player,
     EnemyBot(Entity),
@@ -26,6 +27,9 @@ pub struct ShootCooldown(pub f32);
 
 #[derive(Component)]
 pub struct ProjectileDamage(pub f32);
+
+#[derive(Component, Clone, Copy, Debug, PartialEq)]
+pub struct ProjectileRadius(pub f32);
 
 #[derive(Component)]
 pub struct ProjectilePenetration(pub u32);
@@ -44,6 +48,15 @@ pub struct ProjectileRear(pub bool);
 
 #[derive(Component, Clone, Copy)]
 pub struct ProjectileSplashReady(pub bool);
+
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProjectileGeneration(pub u32);
+
+impl ProjectileGeneration {
+    pub fn matches(self, generation: &LifeGeneration) -> bool {
+        self.0 == generation.0
+    }
+}
 
 pub const HIT_HISTORY_CAPACITY: usize = 16;
 
@@ -79,6 +92,11 @@ pub fn setup_projectile_assets(mut commands: Commands, mut meshes: ResMut<Assets
     });
 }
 
+pub fn projectile_radius(upgrades: &UpgradeState, evolution: &EvolutionState) -> f32 {
+    let damage_upgrade_scale = 1.0 + upgrades.level_of(UpgradeKind::BulletDamage) as f32 * 0.02;
+    constants::PROJECTILE_RADIUS * damage_upgrade_scale * evolution.projectile_size_multiplier()
+}
+
 pub fn shoot_projectile(
     mut commands: Commands,
     assets: Res<ProjectileAssets>,
@@ -96,17 +114,29 @@ pub fn shoot_projectile(
             &mut SpawnProtection,
             &mut MoveVelocity,
             &mut PassiveRuntime,
+            &mut crate::ability::ActiveAbilityState,
+            &LifeGeneration,
         ),
         With<Player>,
     >,
 ) {
-    let Ok((transform, mut cooldown, mut protection, mut move_velocity, mut runtime)) =
-        player_query.single_mut()
+    let Ok((
+        transform,
+        mut cooldown,
+        mut protection,
+        mut move_velocity,
+        mut runtime,
+        mut ability,
+        generation,
+    )) = player_query.single_mut()
     else {
         return;
     };
 
     cooldown.0 -= time.delta_secs();
+    if ability.firing_disabled() {
+        return;
+    }
     if cooldown.0 > 0.0 {
         return;
     }
@@ -115,22 +145,42 @@ pub fn shoot_projectile(
         return;
     }
 
-    let adjustments = runtime.shot_adjustments(evolution.passive());
+    let mut adjustments = runtime.shot_adjustments(evolution.current_kind);
+    if ability.braced() {
+        adjustments.speed_multiplier = 1.30;
+        adjustments.spread_multiplier = 0.25;
+    }
+    if ability.full_battery() {
+        adjustments.bank = None;
+    }
+    let primed = ability.primed_shot();
     cooldown.0 = upgrades.reload_cooldown()
         * evolution.reload_multiplier()
-        * adjustments.cooldown_multiplier;
+        * adjustments.cooldown_multiplier
+        * ability.reload_multiplier();
     protection.cancel();
     let spread = evolution.spread_radians() * adjustments.spread_multiplier;
-    let base_damage = upgrades.bullet_damage() * evolution.bullet_damage_multiplier();
+    let base_damage =
+        upgrades.bullet_damage() * evolution.bullet_damage_multiplier() * primed.damage;
     let bullet_speed = upgrades.bullet_speed()
         * evolution.bullet_speed_multiplier()
-        * adjustments.speed_multiplier;
-    let lifetime = constants::PROJECTILE_LIFETIME * evolution.projectile_lifetime_multiplier();
+        * adjustments.speed_multiplier
+        * primed.speed;
+    let lifetime = constants::PROJECTILE_LIFETIME
+        * evolution.projectile_lifetime_multiplier()
+        * primed.lifetime;
     let knockback = evolution.bullet_knockback_multiplier();
+    let projectile_radius = projectile_radius(&upgrades, &evolution);
+    let projectile_scale = projectile_radius / constants::PROJECTILE_RADIUS;
 
     let specs = evolution.barrel_specs();
     for (index, spec) in specs.iter().enumerate() {
-        if adjustments.bank.is_some_and(|bank| index / 2 != bank) {
+        let bank_index = if evolution.current_kind == EvolutionKind::Fusillade {
+            index / 4
+        } else {
+            index / 2
+        };
+        if adjustments.bank.is_some_and(|bank| bank_index != bank) {
             continue;
         }
         let jitter = if spread > 0.0 {
@@ -146,41 +196,62 @@ pub fn shoot_projectile(
         let right = transform.rotation * barrel_rotation * Vec3::X;
         let direction = transform.rotation * shot_rotation * Vec3::Y;
         let spawn_pos = transform.translation
-            + forward * player::muzzle_projectile_distance(spec.length, &evolution)
+            + forward
+                * player::muzzle_projectile_distance(spec.length, &evolution, projectile_radius)
             + right * spec.lateral_offset;
         let damage = (base_damage * spec.damage_multiplier).max(0.1);
 
-        commands.spawn((
-            Projectile,
-            ProjectileOwner::Player,
-            Lifetime(lifetime),
-            ProjectileDamage(damage),
-            ProjectilePenetration(
-                upgrades
-                    .bullet_penetration()
-                    .saturating_add(evolution.penetration_bonus()),
-            ),
-            ProjectileKnockback(knockback),
-            ProjectileEvolution(evolution.current_kind),
-            ProjectileTravel::default(),
-            ProjectileRear(spec.angle_offset.cos() < 0.0),
-            ProjectileSplashReady(evolution.passive() == PassiveKind::Splash),
-            ProjectileHitHistory::default(),
-            Mesh2d(assets.mesh.clone()),
-            MeshMaterial2d(
-                palettes
-                    .player(profile.data.selected_palette)
-                    .projectile
-                    .clone(),
-            ),
-            Transform::from_translation(spawn_pos),
-            Velocity(direction.xy() * bullet_speed),
-        ));
+        commands
+            .spawn((
+                Projectile,
+                ProjectileOwner::Player,
+                Lifetime(lifetime),
+                ProjectileDamage(damage),
+                ProjectilePenetration(
+                    upgrades
+                        .bullet_penetration()
+                        .saturating_add(evolution.penetration_bonus())
+                        .saturating_add(primed.penetration),
+                ),
+                ProjectileKnockback(knockback),
+                ProjectileEvolution(evolution.current_kind),
+                ProjectileTravel::default(),
+                ProjectileRear(spec.angle_offset.cos() < 0.0),
+                ProjectileSplashReady(evolution.passive() == PassiveKind::Splash),
+                ProjectileHitHistory::default(),
+                Mesh2d(assets.mesh.clone()),
+                MeshMaterial2d(
+                    palettes
+                        .player(profile.data.selected_palette)
+                        .projectile
+                        .clone(),
+                ),
+                Transform::from_translation(spawn_pos).with_scale(Vec3::new(
+                    projectile_scale,
+                    projectile_scale,
+                    1.0,
+                )),
+                Velocity(direction.xy() * bullet_speed),
+            ))
+            .insert((
+                ProjectileGeneration(generation.0),
+                ProjectileRadius(projectile_radius),
+                crate::ability::ProjectileAbility {
+                    clears_projectiles: primed.clears_projectiles,
+                    pinning: primed.pinning,
+                    ..default()
+                },
+            ));
     }
 
     if evolution.passive() == PassiveKind::BoosterRecoil {
         let forward = (transform.rotation * Vec3::Y).xy();
-        move_velocity.0 += forward * upgrades.movement_speed() * 0.08;
+        let recoil = if evolution.current_kind == EvolutionKind::Afterburner {
+            0.12
+        } else {
+            0.08
+        };
+        move_velocity.0 += forward * upgrades.movement_speed() * recoil;
         move_velocity.0 = move_velocity
             .0
             .clamp_length_max(upgrades.movement_speed() * evolution.movement_multiplier() * 1.25);
@@ -197,11 +268,12 @@ pub fn projectile_update(
             &Velocity,
             &mut Lifetime,
             &mut ProjectileTravel,
+            &ProjectileRadius,
         ),
         With<Projectile>,
     >,
 ) {
-    for (entity, mut transform, velocity, mut lifetime, mut travel) in query.iter_mut() {
+    for (entity, mut transform, velocity, mut lifetime, mut travel, radius) in query.iter_mut() {
         let dt = time.delta_secs();
         lifetime.0 -= dt;
         if lifetime.0 <= 0.0 {
@@ -210,7 +282,7 @@ pub fn projectile_update(
         }
         transform.translation += velocity.0.extend(0.0) * dt;
         travel.0 += velocity.0.length() * dt;
-        let half = constants::arena_half_extent() + constants::PROJECTILE_RADIUS;
+        let half = constants::arena_half_extent() + radius.0;
         if transform.translation.x.abs() > half || transform.translation.y.abs() > half {
             commands.entity(entity).despawn();
         }
@@ -220,6 +292,39 @@ pub fn projectile_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn projectile_size_tracks_damage_upgrades_and_heavy_evolutions() {
+        let base_upgrades = UpgradeState::default();
+        let tank = EvolutionState::default();
+        let base_radius = projectile_radius(&base_upgrades, &tank);
+        assert!((base_radius - 4.8).abs() < f32::EPSILON);
+
+        let mut damage_upgrades = base_upgrades.clone();
+        damage_upgrades.levels[UpgradeKind::BulletDamage.index()] = 1;
+        let upgraded_radius = projectile_radius(&damage_upgrades, &tank);
+        assert!((upgraded_radius / base_radius - 1.02).abs() < 0.000_1);
+
+        let cannon = EvolutionState {
+            current_kind: EvolutionKind::Cannon,
+            ..default()
+        };
+        let annihilator = EvolutionState {
+            current_kind: EvolutionKind::Annihilator,
+            ..default()
+        };
+        let rail_cannon = EvolutionState {
+            current_kind: EvolutionKind::RailCannon,
+            ..default()
+        };
+        assert!(projectile_radius(&base_upgrades, &cannon) > base_radius);
+        assert!(
+            projectile_radius(&base_upgrades, &annihilator)
+                > projectile_radius(&base_upgrades, &cannon)
+        );
+        assert_eq!(projectile_radius(&base_upgrades, &rail_cannon), base_radius);
+    }
+
     #[test]
     fn hit_history_accepts_distinct_targets_once() {
         let mut history = ProjectileHitHistory::default();
@@ -228,5 +333,12 @@ mod tests {
         assert!(history.record(a));
         assert!(!history.record(a));
         assert!(history.record(b));
+    }
+
+    #[test]
+    fn projectile_generation_expires_when_owner_starts_a_new_life() {
+        let projectile = ProjectileGeneration(3);
+        assert!(projectile.matches(&LifeGeneration(3)));
+        assert!(!projectile.matches(&LifeGeneration(4)));
     }
 }

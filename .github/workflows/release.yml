@@ -32,7 +32,7 @@ jobs:
         run: |
           mkdir -p "dist/${{ matrix.artifact }}"
           cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}/"
-          cp -r config README.md LICENSE.md "dist/${{ matrix.artifact }}/"
+          cp -r config README.md LICENSE.md CREDITS.md "dist/${{ matrix.artifact }}/"
       - name: Create archive
         shell: bash
         run: |

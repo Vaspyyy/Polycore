@@ -89,6 +89,16 @@ pub enum EnemyBotPlaystyle {
 }
 
 impl EnemyBotPlaystyle {
+    pub fn hotspot_interest(self) -> f32 {
+        match self {
+            Self::Brawler => 1.15,
+            Self::Sharpshooter => 0.90,
+            Self::Juggernaut => 0.85,
+            Self::Sentinel => 1.00,
+            Self::Skirmisher => 1.10,
+        }
+    }
+
     pub(crate) fn upgrade_weights(self) -> &'static [u32; 8] {
         match self {
             Self::Brawler => &[1, 3, 2, 4, 4, 10, 10, 5],
@@ -99,40 +109,87 @@ impl EnemyBotPlaystyle {
         }
     }
 
-    pub(crate) fn weighted_evolution(self, rng: &mut Rng) -> EvolutionKind {
-        let roll = rng.next(100);
-        match self {
-            Self::Brawler => match roll {
-                0..=59 => EvolutionKind::Sprayer,
-                60..=84 => EvolutionKind::TwinBarrel,
-                _ => EvolutionKind::Cannon,
-            },
-            Self::Sharpshooter => match roll {
-                0..=64 => EvolutionKind::Sniper,
-                65..=89 => EvolutionKind::Cannon,
-                _ => EvolutionKind::Gunner,
-            },
-            Self::Juggernaut => match roll {
-                0..=69 => EvolutionKind::RamCore,
-                70..=89 => EvolutionKind::Guard,
-                _ => EvolutionKind::Cannon,
-            },
-            Self::Sentinel => match roll {
-                0..=64 => EvolutionKind::Guard,
-                65..=84 => EvolutionKind::Gunner,
-                _ => EvolutionKind::Sniper,
-            },
-            Self::Skirmisher => match roll {
-                0..=64 => EvolutionKind::Flanker,
-                65..=89 => EvolutionKind::TwinBarrel,
-                _ => EvolutionKind::Sprayer,
-            },
+    pub(crate) fn weighted_evolution(
+        self,
+        adaptation: Option<evolution::EvolutionTag>,
+        rng: &mut Rng,
+    ) -> EvolutionKind {
+        if let Some(adaptation) = adaptation
+            && rng.next(100) < 40
+        {
+            return match adaptation {
+                evolution::EvolutionTag::Defense => EvolutionKind::Guard,
+                evolution::EvolutionTag::Durability => EvolutionKind::RamCore,
+                evolution::EvolutionTag::Mobility => EvolutionKind::Flanker,
+                evolution::EvolutionTag::Precision => EvolutionKind::Sniper,
+                evolution::EvolutionTag::AreaControl => EvolutionKind::Sprayer,
+                evolution::EvolutionTag::Sustained => EvolutionKind::Gunner,
+                evolution::EvolutionTag::Burst => EvolutionKind::Cannon,
+            };
         }
+        let (options, base_weights) = match self {
+            Self::Brawler => (
+                [
+                    EvolutionKind::Sprayer,
+                    EvolutionKind::TwinBarrel,
+                    EvolutionKind::Cannon,
+                ],
+                [60, 25, 15],
+            ),
+            Self::Sharpshooter => (
+                [
+                    EvolutionKind::Sniper,
+                    EvolutionKind::Cannon,
+                    EvolutionKind::Gunner,
+                ],
+                [65, 25, 10],
+            ),
+            Self::Juggernaut => (
+                [
+                    EvolutionKind::RamCore,
+                    EvolutionKind::Guard,
+                    EvolutionKind::Cannon,
+                ],
+                [70, 20, 10],
+            ),
+            Self::Sentinel => (
+                [
+                    EvolutionKind::Guard,
+                    EvolutionKind::Gunner,
+                    EvolutionKind::Sniper,
+                ],
+                [65, 20, 15],
+            ),
+            Self::Skirmisher => (
+                [
+                    EvolutionKind::Flanker,
+                    EvolutionKind::TwinBarrel,
+                    EvolutionKind::Sprayer,
+                ],
+                [65, 25, 10],
+            ),
+        };
+        let weights: [u32; 3] =
+            std::array::from_fn(|index| {
+                base_weights[index]
+                    + 45 * u32::from(adaptation.is_some_and(|tag| {
+                        evolution::definition(options[index]).tags.contains(&tag)
+                    }))
+            });
+        let mut roll = rng.next(weights.iter().sum());
+        for (kind, weight) in options.iter().copied().zip(weights) {
+            if roll < weight {
+                return kind;
+            }
+            roll -= weight;
+        }
+        options[0]
     }
 
     pub(crate) fn weighted_advanced_evolution(
         self,
         parent: EvolutionKind,
+        adaptation: Option<evolution::EvolutionTag>,
         rng: &mut Rng,
     ) -> Option<EvolutionKind> {
         let options = evolution::advanced_kinds(parent)?;
@@ -163,6 +220,7 @@ impl EnemyBotPlaystyle {
             let definition = evolution::definition(kind);
             debug_assert!(kind.is_advanced());
             25 + 50 * u32::from(definition.tags.iter().any(|tag| preferred.contains(tag)))
+                + 60 * u32::from(adaptation.is_some_and(|tag| definition.tags.contains(&tag)))
         });
         let roll = rng.next(weights[0] + weights[1]);
         Some(if roll < weights[0] {
@@ -192,6 +250,10 @@ pub struct EnemyBotBrain {
     pub(crate) truce_timer: f32,
     pub(crate) fleeing: bool,
     pub(crate) aim_angle: f32,
+    pub(crate) close_range_pressure: f32,
+    pub(crate) long_range_pressure: f32,
+    pub(crate) capstone_confirmation: f32,
+    pub(crate) capstone_pending: bool,
 }
 
 impl Default for EnemyBotBrain {
@@ -208,6 +270,10 @@ impl Default for EnemyBotBrain {
             truce_timer: 5.0,
             fleeing: false,
             aim_angle: std::f32::consts::FRAC_PI_2,
+            close_range_pressure: 0.0,
+            long_range_pressure: 0.0,
+            capstone_confirmation: 0.0,
+            capstone_pending: false,
         }
     }
 }
@@ -218,10 +284,43 @@ impl EnemyBotBrain {
         self.retaliation_timer = 2.5;
         self.truce_timer = 0.0;
         self.decision_timer = 0.0;
+        self.close_range_pressure = (self.close_range_pressure + 0.25).min(20.0);
+    }
+
+    pub fn note_projectile_attacker(&mut self, attacker: Entity, travel_distance: f32) {
+        self.last_attacker = Some(attacker);
+        self.retaliation_timer = 2.5;
+        self.truce_timer = 0.0;
+        self.decision_timer = 0.0;
+        if travel_distance >= 350.0 {
+            self.long_range_pressure = (self.long_range_pressure + 1.0).min(20.0);
+        } else {
+            self.close_range_pressure = (self.close_range_pressure + 1.0).min(20.0);
+        }
+    }
+
+    pub fn adaptive_evolution_tag(&self) -> Option<evolution::EvolutionTag> {
+        if self.long_range_pressure >= self.close_range_pressure + 1.0 {
+            Some(evolution::EvolutionTag::Defense)
+        } else if self.close_range_pressure >= self.long_range_pressure + 1.0 {
+            Some(evolution::EvolutionTag::Durability)
+        } else {
+            None
+        }
     }
 
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    pub fn reset_for_respawn(&mut self) {
+        let close_range_pressure = self.close_range_pressure * 0.75;
+        let long_range_pressure = self.long_range_pressure * 0.75;
+        *self = Self {
+            close_range_pressure,
+            long_range_pressure,
+            ..default()
+        };
     }
 }
 
@@ -342,8 +441,11 @@ pub fn setup_enemy_bots(
                 EnemyBotRespawnTimer::default(),
                 CombatStats::default(),
             ))
+            .insert(crate::combat::LifeGeneration::default())
             .insert((SpawnProtection::default(), RecentDamage::default()))
             .insert(crate::passive::PassiveRuntime::default())
+            .insert(crate::ability::ActiveAbilityState::default())
+            .insert(crate::ability::Slowed::default())
             .id();
 
         commands.entity(bot_entity).with_children(|bot| {
@@ -423,7 +525,7 @@ pub fn refresh_enemy_bot_max_health(
     health.current = if was_dead {
         0.0
     } else {
-        (health.max - missing_health).max(0.0)
+        (health.max - missing_health).max(1.0).min(health.max)
     };
 }
 
@@ -436,11 +538,32 @@ pub fn award_enemy_bot_xp(
     evolution: &mut EnemyBotEvolution,
     health: &mut EnemyBotHealth,
     playstyle: &EnemyBotPlaystyle,
+    adaptation: Option<evolution::EvolutionTag>,
+    stats: &mut CombatStats,
+    rng: &mut Rng,
+) {
+    award_enemy_bot_progress(
+        xp_value, xp_value, xp, level, upgrades, evolution, health, playstyle, adaptation, stats,
+        rng,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn award_enemy_bot_progress(
+    xp_value: u32,
+    score_value: u32,
+    xp: &mut EnemyBotXp,
+    level: &mut EnemyBotLevel,
+    upgrades: &mut EnemyBotUpgrades,
+    evolution: &mut EnemyBotEvolution,
+    health: &mut EnemyBotHealth,
+    playstyle: &EnemyBotPlaystyle,
+    adaptation: Option<evolution::EvolutionTag>,
     stats: &mut CombatStats,
     rng: &mut Rng,
 ) {
     xp.0 += xp_value;
-    stats.life_score = stats.life_score.saturating_add(xp_value);
+    stats.life_score = stats.life_score.saturating_add(score_value);
     let gained = constants::consume_level_ups(&mut xp.0, &mut level.0);
     upgrades.0.add_points(gained);
 
@@ -448,10 +571,11 @@ pub fn award_enemy_bot_xp(
     if evolution.0.current_kind == EvolutionKind::Tank {
         evolution
             .0
-            .choose_kind_for_level(level.0, playstyle.weighted_evolution(rng));
+            .choose_kind_for_level(level.0, playstyle.weighted_evolution(adaptation, rng));
     }
     if evolution.0.current_kind.is_level_five()
-        && let Some(choice) = playstyle.weighted_advanced_evolution(evolution.0.current_kind, rng)
+        && let Some(choice) =
+            playstyle.weighted_advanced_evolution(evolution.0.current_kind, adaptation, rng)
     {
         evolution.0.choose_kind_for_level(level.0, choice);
     }
@@ -677,6 +801,7 @@ pub fn sync_enemy_bot_visibility(
             &mut EnemyBotBrain,
             &mut CombatStats,
             &mut crate::passive::PassiveRuntime,
+            &mut crate::combat::LifeGeneration,
         ),
         With<EnemyBotSceneEntity>,
     >,
@@ -756,11 +881,14 @@ pub fn sync_enemy_bot_visibility(
     if should_reset {
         shape_kills.0 = 0;
         *profile_tracker = crate::dominance::ProfileProgressTracker::default();
-        for (mut respawn_timer, mut brain, mut stats, mut passive_runtime) in bot_state.iter_mut() {
+        for (mut respawn_timer, mut brain, mut stats, mut passive_runtime, mut generation) in
+            bot_state.iter_mut()
+        {
             respawn_timer.0 = 0.0;
             brain.reset();
             *stats = CombatStats::default();
             passive_runtime.reset_for_life();
+            generation.0 = generation.0.wrapping_add(1);
         }
     }
     if should_reset {
@@ -836,9 +964,18 @@ mod tests {
     fn bot_profiles_choose_distinct_evolutions() {
         let mut rng = Rng::new(5);
         for playstyle in BOT_PLAYSTYLES {
-            let kind = playstyle.weighted_evolution(&mut rng);
+            let kind = playstyle.weighted_evolution(None, &mut rng);
             assert_ne!(kind, EvolutionKind::Tank);
         }
+    }
+
+    #[test]
+    fn hotspot_interest_matches_playstyle_contract() {
+        assert_eq!(EnemyBotPlaystyle::Brawler.hotspot_interest(), 1.15);
+        assert_eq!(EnemyBotPlaystyle::Sharpshooter.hotspot_interest(), 0.90);
+        assert_eq!(EnemyBotPlaystyle::Juggernaut.hotspot_interest(), 0.85);
+        assert_eq!(EnemyBotPlaystyle::Sentinel.hotspot_interest(), 1.00);
+        assert_eq!(EnemyBotPlaystyle::Skirmisher.hotspot_interest(), 1.10);
     }
 
     #[test]
@@ -854,6 +991,23 @@ mod tests {
 
         assert_eq!(health.current, 0.0);
         assert_eq!(health.max, constants::PLAYER_MAX_HEALTH + 40.0);
+    }
+
+    #[test]
+    fn max_health_reduction_keeps_a_living_bot_alive() {
+        let mut health = EnemyBotHealth {
+            current: 5.0,
+            max: constants::PLAYER_MAX_HEALTH,
+        };
+        let evolution = EvolutionState {
+            current_kind: EvolutionKind::Sniper,
+            ..default()
+        };
+
+        refresh_enemy_bot_max_health(&mut health, &UpgradeState::default(), &evolution);
+
+        assert_eq!(health.max, 40.0);
+        assert_eq!(health.current, 1.0);
     }
 
     #[test]
@@ -877,6 +1031,7 @@ mod tests {
             &mut evolution,
             &mut health,
             &EnemyBotPlaystyle::Brawler,
+            None,
             &mut stats,
             &mut rng,
         );
@@ -890,7 +1045,7 @@ mod tests {
         let mut rng = Rng::new(77);
         for style in BOT_PLAYSTYLES {
             for _ in 0..200 {
-                let choice = style.weighted_evolution(&mut rng);
+                let choice = style.weighted_evolution(None, &mut rng);
                 let allowed = match style {
                     EnemyBotPlaystyle::Brawler => [
                         EvolutionKind::Sprayer,
@@ -926,6 +1081,38 @@ mod tests {
                 assert!(allowed);
             }
         }
+    }
+
+    #[test]
+    fn bot_adaptation_tracks_attack_range_across_respawns() {
+        let attacker = Entity::from_bits(99);
+        let mut brain = EnemyBotBrain::default();
+        brain.note_projectile_attacker(attacker, 500.0);
+        assert_eq!(
+            brain.adaptive_evolution_tag(),
+            Some(evolution::EvolutionTag::Defense)
+        );
+        brain.reset_for_respawn();
+        assert!(brain.long_range_pressure > 0.0);
+
+        for _ in 0..3 {
+            brain.note_projectile_attacker(attacker, 50.0);
+        }
+        assert_eq!(
+            brain.adaptive_evolution_tag(),
+            Some(evolution::EvolutionTag::Durability)
+        );
+    }
+
+    #[test]
+    fn adaptive_counter_pick_can_override_static_playstyle_candidates() {
+        let mut rng = Rng::new(31);
+        let picked_guard = (0..100).any(|_| {
+            EnemyBotPlaystyle::Brawler
+                .weighted_evolution(Some(evolution::EvolutionTag::Defense), &mut rng)
+                == EvolutionKind::Guard
+        });
+        assert!(picked_guard);
     }
 
     #[test]

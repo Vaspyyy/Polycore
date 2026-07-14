@@ -18,10 +18,14 @@ pub enum PaletteId {
     Obsidian,
     ApexWhite,
     Spectrum,
+    IonCyan,
+    CommandCrimson,
+    HazardAmber,
+    EnduranceViolet,
 }
 
 impl PaletteId {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::CoreBlue,
         Self::CircuitMint,
         Self::Ember,
@@ -34,6 +38,10 @@ impl PaletteId {
         Self::Obsidian,
         Self::ApexWhite,
         Self::Spectrum,
+        Self::IonCyan,
+        Self::CommandCrimson,
+        Self::HazardAmber,
+        Self::EnduranceViolet,
     ];
 
     pub fn name(self) -> &'static str {
@@ -58,7 +66,7 @@ const fn rgba(rgb: [u8; 3]) -> [f32; 4] {
     ]
 }
 
-pub const PALETTES: [TankPalette; 12] = [
+pub const PALETTES: [TankPalette; 16] = [
     TankPalette {
         name: "Core Blue",
         body: rgba([51, 153, 255]),
@@ -130,6 +138,30 @@ pub const PALETTES: [TankPalette; 12] = [
         body: rgba([217, 95, 176]),
         barrel: rgba([86, 207, 225]),
         projectile: rgba([255, 209, 102]),
+    },
+    TankPalette {
+        name: "Ion Cyan",
+        body: rgba([40, 222, 235]),
+        barrel: rgba([65, 105, 116]),
+        projectile: rgba([177, 255, 255]),
+    },
+    TankPalette {
+        name: "Command Crimson",
+        body: rgba([196, 35, 63]),
+        barrel: rgba([105, 63, 72]),
+        projectile: rgba([255, 150, 164]),
+    },
+    TankPalette {
+        name: "Hazard Amber",
+        body: rgba([239, 154, 32]),
+        barrel: rgba([105, 83, 49]),
+        projectile: rgba([255, 224, 120]),
+    },
+    TankPalette {
+        name: "Endurance Violet",
+        body: rgba([125, 70, 221]),
+        barrel: rgba([81, 71, 111]),
+        projectile: rgba([218, 190, 255]),
     },
 ];
 

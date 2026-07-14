@@ -57,6 +57,7 @@ const UPGRADE_KEYS: [KeyCode; UPGRADE_COUNT] = [
 pub enum UpgradeKind {
     HealthRegen = HEALTH_REGEN_INDEX,
     MaxHealth = MAX_HEALTH_INDEX,
+    BulletDamage = BULLET_DAMAGE_INDEX,
     MovementSpeed = MOVEMENT_SPEED_INDEX,
 }
 
@@ -590,7 +591,10 @@ pub fn animate_upgrade_fills(
             Val::Percent(value) => value,
             _ => 0.0,
         };
-        node.width = Val::Percent(approach_percent(current, target, max_delta));
+        let next = approach_percent(current, target, max_delta);
+        if (next - current).abs() > f32::EPSILON {
+            node.width = Val::Percent(next);
+        }
     }
 }
 
