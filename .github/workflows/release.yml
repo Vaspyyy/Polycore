@@ -5,61 +5,106 @@ on:
     tags: ["v*"]
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  package:
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            artifact: polycore-linux-x86_64
-            binary: polycore
-          - os: windows-latest
-            artifact: polycore-windows-x86_64
-            binary: polycore.exe
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libasound2-dev \
-            libudev-dev \
-            libwayland-dev \
-            libxkbcommon-dev
-      - run: cargo build --release
-      - name: Stage archive
-        shell: bash
-        run: |
-          mkdir -p "dist/${{ matrix.artifact }}"
-          cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}/"
-          cp -r config README.md LICENSE.md CREDITS.md "dist/${{ matrix.artifact }}/"
-      - name: Create archive
-        shell: bash
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            7z a "dist/${{ matrix.artifact }}.zip" "./dist/${{ matrix.artifact }}/*"
-          else
-            tar -C dist -czf "dist/${{ matrix.artifact }}.tar.gz" "${{ matrix.artifact }}"
-          fi
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}
-          path: dist/${{ matrix.artifact }}.*
-
   publish:
-    needs: package
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Find successful CI run for tag commit
+        id: ci-run
+        uses: actions/github-script@v9
         with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const headSha = context.sha;
+            const deadline = Date.now() + 30 * 60 * 1000;
+            const pollInterval = 15 * 1000;
+            const expectedArtifacts = [
+              "polycore-linux-x86_64",
+              "polycore-windows-x86_64",
+            ];
+
+            let run;
+            while (Date.now() < deadline) {
+              const response = await github.rest.actions.listWorkflowRuns({
+                owner,
+                repo,
+                workflow_id: "ci.yml",
+                event: "push",
+                branch: "main",
+                head_sha: headSha,
+                per_page: 100,
+              });
+
+              run = response.data.workflow_runs.find(candidate =>
+                candidate.head_sha === headSha &&
+                candidate.head_branch === "main" &&
+                candidate.event === "push"
+              );
+
+              if (!run) {
+                core.info(`Waiting for main CI to start for ${headSha}...`);
+              } else if (run.status !== "completed") {
+                core.info(`Waiting for CI run ${run.id}; status is ${run.status}...`);
+              } else {
+                break;
+              }
+
+              await new Promise(resolve => setTimeout(resolve, pollInterval));
+            }
+
+            if (!run || run.status !== "completed") {
+              throw new Error(
+                `Timed out waiting for main CI on ${headSha}. ` +
+                "Ensure the tag points to main and rerun this workflow after CI completes."
+              );
+            }
+
+            if (run.conclusion !== "success") {
+              throw new Error(
+                `CI run ${run.id} concluded with ${run.conclusion}; refusing to publish. ` +
+                "Fix or rerun main CI before rerunning this release."
+              );
+            }
+
+            const artifacts = await github.paginate(
+              github.rest.actions.listWorkflowRunArtifacts,
+              { owner, repo, run_id: run.id, per_page: 100 }
+            );
+            const missing = expectedArtifacts.filter(name => {
+              const artifact = artifacts.find(candidate => candidate.name === name);
+              return !artifact || artifact.expired || artifact.size_in_bytes === 0;
+            });
+
+            if (missing.length > 0) {
+              throw new Error(
+                `CI run ${run.id} is missing usable release artifacts: ${missing.join(", ")}. ` +
+                "Rerun main CI to regenerate the 14-day artifacts, then rerun this release."
+              );
+            }
+
+            core.info(`Promoting artifacts from successful CI run ${run.id}.`);
+            core.setOutput("run-id", String(run.id));
+      - name: Download verified CI artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: polycore-*
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.ci-run.outputs.run-id }}
+      - name: Verify release archives
+        shell: bash
+        run: |
+          test -s dist/polycore-linux-x86_64.tar.gz
+          test -s dist/polycore-windows-x86_64.zip
+          tar -tzf dist/polycore-linux-x86_64.tar.gz >/dev/null
+          unzip -t dist/polycore-windows-x86_64.zip >/dev/null
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
         with:
           files: dist/*
