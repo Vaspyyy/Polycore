@@ -3,73 +3,25 @@ use bevy::{
     input::{ButtonState, keyboard::KeyboardInput},
     prelude::*,
 };
-use std::{env, fs, path::PathBuf};
 
 const MODE_HIGHLIGHT_WIDTH: f32 = 154.0;
 const MODE_HIGHLIGHT_SINGLE_X: f32 = 10.0;
-const MODE_HIGHLIGHT_MULTI_X: f32 = 172.0;
 
 #[derive(Resource, PartialEq, Eq, Clone, Copy)]
 pub enum GamePhase {
     Menu,
     Playing,
+    Paused,
     Dead,
 }
 
 #[derive(Resource, PartialEq, Eq, Clone, Copy)]
 pub enum GameMode {
     Singleplayer,
-    Multiplayer,
 }
 
 #[derive(Resource)]
 pub struct PlayerName(pub String);
-
-impl PlayerName {
-    pub fn load() -> Self {
-        let Some(path) = player_name_path() else {
-            return Self(String::new());
-        };
-        let Ok(name) = fs::read_to_string(path) else {
-            return Self(String::new());
-        };
-        Self(sanitize_player_name(&name))
-    }
-
-    pub fn save(&self) {
-        let Some(path) = player_name_path() else {
-            return;
-        };
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::write(path, sanitize_player_name(&self.0));
-    }
-}
-
-fn player_name_path() -> Option<PathBuf> {
-    if let Ok(config_home) = env::var("XDG_CONFIG_HOME") {
-        return Some(
-            PathBuf::from(config_home)
-                .join("polycore")
-                .join("player_name.txt"),
-        );
-    }
-    env::var("HOME").ok().map(|home| {
-        PathBuf::from(home)
-            .join(".config")
-            .join("polycore")
-            .join("player_name.txt")
-    })
-}
-
-fn sanitize_player_name(name: &str) -> String {
-    name.trim()
-        .chars()
-        .filter(|character| !character.is_control())
-        .take(18)
-        .collect()
-}
 
 #[derive(Resource, Default)]
 pub struct NameInputFocus(pub bool);
@@ -147,6 +99,10 @@ pub struct ModeHighlight;
 
 pub fn is_playing(phase: Res<GamePhase>) -> bool {
     *phase == GamePhase::Playing
+}
+
+pub fn is_simulating(phase: Res<GamePhase>) -> bool {
+    matches!(*phase, GamePhase::Playing | GamePhase::Dead)
 }
 
 pub fn setup_menu(
@@ -229,9 +185,9 @@ pub fn setup_menu(
                                 .with_children(|option| {
                                     option.spawn(menu_option_text("Singleplayer"));
                                 });
-                            mode.spawn(mode_option("Multiplayer", GameMode::Multiplayer))
+                            mode.spawn(unavailable_mode_option())
                                 .with_children(|option| {
-                                    option.spawn(menu_option_text("Multiplayer"));
+                                    option.spawn(menu_unavailable_text());
                                 });
                         });
                     });
@@ -240,7 +196,7 @@ pub fn setup_menu(
                         column.spawn(menu_label("Region"));
                         column.spawn(region_select_box()).with_children(|region| {
                             region.spawn((
-                                Text::new("Region Placeholder"),
+                                Text::new("Unavailable"),
                                 TextFont {
                                     font_size: FontSize::Px(21.0),
                                     ..default()
@@ -615,6 +571,22 @@ fn mode_option(
     )
 }
 
+fn unavailable_mode_option() -> (Node, BackgroundColor, Name, Pickable) {
+    (
+        Node {
+            width: Val::Percent(50.0),
+            height: Val::Px(42.0),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            align_items: AlignItems::Center,
+            justify_content: JustifyContent::Center,
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.1, 0.1, 0.12, 0.35)),
+        Name::new("Multiplayer - Coming Soon"),
+        Pickable::IGNORE,
+    )
+}
+
 fn menu_option_text(label: &'static str) -> (Text, TextFont, TextColor, TextShadow) {
     (
         Text::new(label),
@@ -625,6 +597,21 @@ fn menu_option_text(label: &'static str) -> (Text, TextFont, TextColor, TextShad
         TextColor(Color::WHITE),
         TextShadow {
             offset: Vec2::new(2.0, 2.0),
+            color: Color::BLACK,
+        },
+    )
+}
+
+fn menu_unavailable_text() -> (Text, TextFont, TextColor, TextShadow) {
+    (
+        Text::new("Multiplayer - Coming Soon"),
+        TextFont {
+            font_size: FontSize::Px(12.0),
+            ..default()
+        },
+        TextColor(Color::srgba(0.72, 0.72, 0.76, 1.0)),
+        TextShadow {
+            offset: Vec2::new(1.0, 1.0),
             color: Color::BLACK,
         },
     )
@@ -650,6 +637,7 @@ pub fn handle_play_button(
     mut phase: ResMut<GamePhase>,
     mut focus: ResMut<NameInputFocus>,
     name: Res<PlayerName>,
+    mut profile: ResMut<crate::profile::Profile>,
     mut play_buttons: Query<
         (&Interaction, &mut BackgroundColor),
         (Changed<Interaction>, With<PlayButton>),
@@ -669,7 +657,7 @@ pub fn handle_play_button(
             Interaction::Pressed => {
                 *phase = GamePhase::Playing;
                 focus.0 = false;
-                name.save();
+                profile.set_player_name(&name.0);
                 *color = BackgroundColor(Color::srgba(0.10, 0.54, 0.67, 1.0));
                 for mut border in name_fields.iter_mut() {
                     *border = BorderColor::all(Color::srgba(0.74, 0.74, 0.74, 1.0));
@@ -740,6 +728,13 @@ pub fn sync_phase_visibility(
                     *visibility
                 }
             }
+            GamePhase::Paused => {
+                if menu_root.is_some() || decoration.is_some() || death_root.is_some() {
+                    Visibility::Hidden
+                } else {
+                    *visibility
+                }
+            }
             GamePhase::Dead => {
                 if death_root.is_some() {
                     Visibility::Visible
@@ -799,6 +794,7 @@ pub fn handle_death_buttons(
     mut upgrades: ResMut<hud::UpgradeState>,
     mut evolutions: ResMut<evolution::EvolutionState>,
     mut bot_reset_pending: ResMut<enemy_bot::EnemyBotResetPending>,
+    mut rng: ResMut<crate::rng::Rng>,
     mut buttons: Query<
         (
             &Interaction,
@@ -808,8 +804,15 @@ pub fn handle_death_buttons(
         ),
         (Changed<Interaction>, With<Button>),
     >,
-    shapes: Query<Entity, With<shape::Shape>>,
-    projectiles: Query<Entity, With<projectile::Projectile>>,
+    shapes: Query<(Entity, &Transform), (With<shape::Shape>, Without<player::Player>)>,
+    projectiles: Query<
+        (Entity, &Transform, &player::Velocity),
+        (With<projectile::Projectile>, Without<player::Player>),
+    >,
+    bots: Query<
+        (&Transform, &enemy_bot::EnemyBotHealth),
+        (With<enemy_bot::EnemyBot>, Without<player::Player>),
+    >,
     mut player_query: Query<
         (
             &mut Transform,
@@ -818,8 +821,10 @@ pub fn handle_death_buttons(
             &mut player::Velocity,
             &mut player::MoveVelocity,
             &mut combat::CombatStats,
+            &mut crate::tank::SpawnProtection,
+            &mut crate::passive::PassiveRuntime,
         ),
-        With<player::Player>,
+        (With<player::Player>, Without<enemy_bot::EnemyBot>),
     >,
 ) {
     for (interaction, mut color, retry, continue_button) in buttons.iter_mut() {
@@ -843,6 +848,8 @@ pub fn handle_death_buttons(
                     &projectiles,
                     &mut player_query,
                     full_world_reset,
+                    &bots,
+                    &mut rng,
                 );
                 if retry.is_some() {
                     bot_reset_pending.0 = false;
@@ -879,8 +886,11 @@ fn reset_run(
     spawn_timer: &mut shape::SpawnTimer,
     upgrades: &mut hud::UpgradeState,
     evolutions: &mut evolution::EvolutionState,
-    shapes: &Query<Entity, With<shape::Shape>>,
-    projectiles: &Query<Entity, With<projectile::Projectile>>,
+    shapes: &Query<(Entity, &Transform), (With<shape::Shape>, Without<player::Player>)>,
+    projectiles: &Query<
+        (Entity, &Transform, &player::Velocity),
+        (With<projectile::Projectile>, Without<player::Player>),
+    >,
     player_query: &mut Query<
         (
             &mut Transform,
@@ -889,16 +899,23 @@ fn reset_run(
             &mut player::Velocity,
             &mut player::MoveVelocity,
             &mut combat::CombatStats,
+            &mut crate::tank::SpawnProtection,
+            &mut crate::passive::PassiveRuntime,
         ),
-        With<player::Player>,
+        (With<player::Player>, Without<enemy_bot::EnemyBot>),
     >,
     full_world_reset: bool,
+    bots: &Query<
+        (&Transform, &enemy_bot::EnemyBotHealth),
+        (With<enemy_bot::EnemyBot>, Without<player::Player>),
+    >,
+    rng: &mut crate::rng::Rng,
 ) {
     if full_world_reset {
-        for entity in shapes.iter() {
+        for (entity, _) in shapes.iter() {
             commands.entity(entity).despawn();
         }
-        for entity in projectiles.iter() {
+        for (entity, _, _) in projectiles.iter() {
             commands.entity(entity).despawn();
         }
         spawn_timer.0 = 0.0;
@@ -918,16 +935,45 @@ fn reset_run(
         mut velocity,
         mut move_velocity,
         mut combat_stats,
+        mut protection,
+        mut passive_runtime,
     )) = player_query.single_mut()
     {
-        transform.translation = Vec3::ZERO;
+        let tank_positions = bots
+            .iter()
+            .filter(|(_, health)| health.current > 0.0)
+            .map(|(transform, _)| transform.translation.xy())
+            .collect::<Vec<_>>();
+        let shape_positions = shapes
+            .iter()
+            .map(|(_, transform)| transform.translation.xy())
+            .collect::<Vec<_>>();
+        let corridors = projectiles
+            .iter()
+            .map(|(_, transform, velocity)| crate::tank::ProjectileCorridor {
+                start: transform.translation.xy(),
+                end: transform.translation.xy() + velocity.0,
+            })
+            .collect::<Vec<_>>();
+        let position = if full_world_reset {
+            Vec2::ZERO
+        } else {
+            crate::tank::safe_spawn(rng, &tank_positions, &shape_positions, &corridors)
+        };
+        transform.translation = position.extend(0.0);
         transform.rotation = Quat::IDENTITY;
         health.max = constants::PLAYER_MAX_HEALTH;
         health.current = health.max;
         damage_cooldown.0 = 0.0;
         velocity.0 = Vec2::ZERO;
         move_velocity.0 = Vec2::ZERO;
-        *combat_stats = combat::CombatStats::default();
+        if full_world_reset {
+            combat::reset_match_stats(&mut combat_stats);
+        } else {
+            combat::reset_life_stats(&mut combat_stats);
+        }
+        protection.remaining = constants::SPAWN_PROTECTION_SECS;
+        passive_runtime.reset_for_life();
     }
 }
 
@@ -936,7 +982,7 @@ pub fn handle_mode_buttons(
     buttons: Query<(&Interaction, &ModeButton), (Changed<Interaction>, With<Button>)>,
 ) {
     for (interaction, button) in buttons.iter() {
-        if *interaction == Interaction::Pressed {
+        if *interaction == Interaction::Pressed && button.0 == GameMode::Singleplayer {
             *mode = button.0;
         }
     }
@@ -949,7 +995,6 @@ pub fn update_mode_highlight(
 ) {
     let target = match *mode {
         GameMode::Singleplayer => MODE_HIGHLIGHT_SINGLE_X,
-        GameMode::Multiplayer => MODE_HIGHLIGHT_MULTI_X,
     };
     let speed = 720.0 * time.delta_secs();
 

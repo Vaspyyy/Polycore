@@ -1,8 +1,9 @@
 use crate::{menu::GamePhase, shape::Level};
 use bevy::prelude::*;
 
-const EVOLUTION_CAPS: [u32; 1] = [5];
+const EVOLUTION_CAPS: [u32; 2] = [5, 15];
 const LEVEL_5: u32 = 5;
+const LEVEL_15: u32 = 15;
 const MAX_OPTIONS: usize = 8;
 const CARD_WIDTH: f32 = 178.0;
 const CARD_HEIGHT: f32 = 154.0;
@@ -55,6 +56,375 @@ pub enum EvolutionKind {
     Sprayer,
     Guard,
     Flanker,
+    Minigun,
+    Stabilizer,
+    Annihilator,
+    RailCannon,
+    QuadBarrel,
+    Crossfire,
+    Marksman,
+    Hunter,
+    Juggernaut,
+    Interceptor,
+    PentaShot,
+    Needler,
+    Fortress,
+    Bulwark,
+    Booster,
+    Fighter,
+}
+
+impl EvolutionKind {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Tank => "tank",
+            Self::Gunner => "gunner",
+            Self::Cannon => "cannon",
+            Self::TwinBarrel => "twin_barrel",
+            Self::Sniper => "sniper",
+            Self::RamCore => "ram_core",
+            Self::Sprayer => "sprayer",
+            Self::Guard => "guard",
+            Self::Flanker => "flanker",
+            Self::Minigun => "minigun",
+            Self::Stabilizer => "stabilizer",
+            Self::Annihilator => "annihilator",
+            Self::RailCannon => "rail_cannon",
+            Self::QuadBarrel => "quad_barrel",
+            Self::Crossfire => "crossfire",
+            Self::Marksman => "marksman",
+            Self::Hunter => "hunter",
+            Self::Juggernaut => "juggernaut",
+            Self::Interceptor => "interceptor",
+            Self::PentaShot => "penta_shot",
+            Self::Needler => "needler",
+            Self::Fortress => "fortress",
+            Self::Bulwark => "bulwark",
+            Self::Booster => "booster",
+            Self::Fighter => "fighter",
+        }
+    }
+
+    pub fn is_level_five(self) -> bool {
+        definition(self).level == LEVEL_5
+    }
+
+    pub fn is_advanced(self) -> bool {
+        definition(self).level == LEVEL_15
+    }
+
+    pub fn base(self) -> Self {
+        base_kind(self)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PassiveKind {
+    #[default]
+    None,
+    MinigunSpin,
+    Stabilized,
+    Splash,
+    DistanceDamage,
+    AlternatingPairs,
+    RearKnockback,
+    HunterMark,
+    MomentumArmor,
+    FrontalArmor,
+    PhasedFan,
+    ConsecutiveHits,
+    Entrenched,
+    FrontalShield,
+    BoosterRecoil,
+    HitSpeed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvolutionTag {
+    Sustained,
+    Precision,
+    Burst,
+    AreaControl,
+    Durability,
+    Defense,
+    Mobility,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EvolutionModifiers {
+    pub reload: f32,
+    pub bullet_damage: f32,
+    pub bullet_speed: f32,
+    pub knockback: f32,
+    pub lifetime: f32,
+    pub spread: f32,
+    pub movement: f32,
+    pub max_health_bonus: f32,
+    pub health_regen_bonus: f32,
+    pub body_damage_bonus: f32,
+}
+
+impl EvolutionModifiers {
+    const IDENTITY: Self = Self {
+        reload: 1.0,
+        bullet_damage: 1.0,
+        bullet_speed: 1.0,
+        knockback: 1.0,
+        lifetime: 1.0,
+        spread: 1.0,
+        movement: 1.0,
+        max_health_bonus: 0.0,
+        health_regen_bonus: 0.0,
+        body_damage_bonus: 0.0,
+    };
+
+    fn compose(self, next: Self) -> Self {
+        Self {
+            reload: self.reload * next.reload,
+            bullet_damage: self.bullet_damage * next.bullet_damage,
+            bullet_speed: self.bullet_speed * next.bullet_speed,
+            knockback: self.knockback * next.knockback,
+            lifetime: self.lifetime * next.lifetime,
+            spread: self.spread * next.spread,
+            movement: self.movement * next.movement,
+            max_health_bonus: self.max_health_bonus + next.max_health_bonus,
+            health_regen_bonus: self.health_regen_bonus + next.health_regen_bonus,
+            body_damage_bonus: self.body_damage_bonus + next.body_damage_bonus,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct EvolutionDefinition {
+    pub kind: EvolutionKind,
+    pub parent: Option<EvolutionKind>,
+    pub level: u32,
+    pub modifiers: EvolutionModifiers,
+    pub passive: PassiveKind,
+    pub tags: &'static [EvolutionTag],
+}
+
+const SUSTAINED: &[EvolutionTag] = &[EvolutionTag::Sustained];
+const PRECISION: &[EvolutionTag] = &[EvolutionTag::Precision];
+const BURST: &[EvolutionTag] = &[EvolutionTag::Burst];
+const CONTROL: &[EvolutionTag] = &[EvolutionTag::AreaControl];
+const DURABILITY: &[EvolutionTag] = &[EvolutionTag::Durability];
+const DEFENSE: &[EvolutionTag] = &[EvolutionTag::Defense];
+const MOBILITY: &[EvolutionTag] = &[EvolutionTag::Mobility];
+
+fn modifiers(
+    reload: f32,
+    damage: f32,
+    speed: f32,
+    knockback: f32,
+    lifetime: f32,
+    spread: f32,
+    movement: f32,
+    health: f32,
+    regen: f32,
+    body: f32,
+) -> EvolutionModifiers {
+    EvolutionModifiers {
+        reload,
+        bullet_damage: damage,
+        bullet_speed: speed,
+        knockback,
+        lifetime,
+        spread,
+        movement,
+        max_health_bonus: health,
+        health_regen_bonus: regen,
+        body_damage_bonus: body,
+    }
+}
+
+pub fn definition(kind: EvolutionKind) -> EvolutionDefinition {
+    use EvolutionKind as K;
+    let (parent, level, values, passive, tags) = match kind {
+        K::Tank => (
+            None,
+            0,
+            EvolutionModifiers::IDENTITY,
+            PassiveKind::None,
+            SUSTAINED,
+        ),
+        K::Gunner => (
+            Some(K::Tank),
+            5,
+            modifiers(0.72, 0.78, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            PassiveKind::None,
+            SUSTAINED,
+        ),
+        K::Cannon => (
+            Some(K::Tank),
+            5,
+            modifiers(1.65, 2.35, 0.86, 2.35, 1.15, 1.0, 1.0, 0.0, 0.0, 0.0),
+            PassiveKind::None,
+            BURST,
+        ),
+        K::TwinBarrel => (
+            Some(K::Tank),
+            5,
+            modifiers(0.95, 0.82, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0),
+            PassiveKind::None,
+            SUSTAINED,
+        ),
+        K::Sniper => (
+            Some(K::Tank),
+            5,
+            modifiers(1.18, 1.22, 1.48, 1.2, 1.70, 1.0, 0.96, -10.0, 0.0, 0.0),
+            PassiveKind::None,
+            PRECISION,
+        ),
+        K::RamCore => (
+            Some(K::Tank),
+            5,
+            modifiers(1.10, 0.55, 1.0, 0.8, 1.0, 1.0, 0.94, 45.0, 0.6, 5.0),
+            PassiveKind::None,
+            DURABILITY,
+        ),
+        K::Sprayer => (
+            Some(K::Tank),
+            5,
+            modifiers(0.48, 0.35, 0.92, 0.75, 0.85, 1.0, 1.0, 0.0, 0.0, 0.0),
+            PassiveKind::None,
+            CONTROL,
+        ),
+        K::Guard => (
+            Some(K::Tank),
+            5,
+            modifiers(1.08, 0.85, 1.0, 1.0, 1.0, 1.0, 0.84, 55.0, 2.5, 2.0),
+            PassiveKind::None,
+            DEFENSE,
+        ),
+        K::Flanker => (
+            Some(K::Tank),
+            5,
+            modifiers(0.92, 0.90, 1.05, 1.0, 1.0, 1.0, 1.22, -20.0, -0.3, 0.0),
+            PassiveKind::None,
+            MOBILITY,
+        ),
+        K::Minigun => (
+            Some(K::Gunner),
+            15,
+            modifiers(1.0, 0.95, 1.0, 1.0, 1.0, 1.0, 0.96, 0.0, 0.0, 0.0),
+            PassiveKind::MinigunSpin,
+            SUSTAINED,
+        ),
+        K::Stabilizer => (
+            Some(K::Gunner),
+            15,
+            modifiers(1.05, 1.08, 1.0, 1.0, 1.1, 1.0, 0.96, 0.0, 0.0, 0.0),
+            PassiveKind::Stabilized,
+            PRECISION,
+        ),
+        K::Annihilator => (
+            Some(K::Cannon),
+            15,
+            modifiers(1.35, 1.12, 0.82, 1.25, 1.05, 1.0, 0.92, 10.0, 0.0, 0.0),
+            PassiveKind::Splash,
+            BURST,
+        ),
+        K::RailCannon => (
+            Some(K::Cannon),
+            15,
+            modifiers(1.15, 0.82, 1.35, 0.65, 1.35, 1.0, 0.98, -10.0, 0.0, 0.0),
+            PassiveKind::DistanceDamage,
+            PRECISION,
+        ),
+        K::QuadBarrel => (
+            Some(K::TwinBarrel),
+            15,
+            modifiers(0.88, 0.78, 1.0, 0.9, 1.0, 1.0, 0.98, 0.0, 0.0, 0.0),
+            PassiveKind::AlternatingPairs,
+            SUSTAINED,
+        ),
+        K::Crossfire => (
+            Some(K::TwinBarrel),
+            15,
+            modifiers(0.94, 0.84, 1.0, 1.0, 1.0, 1.0, 1.04, 0.0, 0.0, 0.0),
+            PassiveKind::RearKnockback,
+            DEFENSE,
+        ),
+        K::Marksman => (
+            Some(K::Sniper),
+            15,
+            modifiers(1.12, 1.02, 1.08, 1.0, 1.25, 1.0, 0.95, -5.0, 0.0, 0.0),
+            PassiveKind::DistanceDamage,
+            PRECISION,
+        ),
+        K::Hunter => (
+            Some(K::Sniper),
+            15,
+            modifiers(0.92, 0.82, 1.0, 0.9, 1.05, 1.0, 1.02, 0.0, 0.0, 0.0),
+            PassiveKind::HunterMark,
+            PRECISION,
+        ),
+        K::Juggernaut => (
+            Some(K::RamCore),
+            15,
+            modifiers(1.15, 0.75, 0.9, 1.0, 0.9, 1.0, 0.95, 40.0, 0.5, 4.0),
+            PassiveKind::MomentumArmor,
+            DURABILITY,
+        ),
+        K::Interceptor => (
+            Some(K::RamCore),
+            15,
+            modifiers(1.0, 0.9, 1.05, 1.0, 1.0, 1.0, 1.08, 10.0, 0.0, 1.0),
+            PassiveKind::FrontalArmor,
+            DEFENSE,
+        ),
+        K::PentaShot => (
+            Some(K::Sprayer),
+            15,
+            modifiers(1.10, 0.82, 0.95, 1.0, 0.95, 1.0, 0.96, 0.0, 0.0, 0.0),
+            PassiveKind::PhasedFan,
+            CONTROL,
+        ),
+        K::Needler => (
+            Some(K::Sprayer),
+            15,
+            modifiers(0.85, 0.92, 1.10, 0.7, 1.0, 0.32, 1.04, -5.0, 0.0, 0.0),
+            PassiveKind::ConsecutiveHits,
+            SUSTAINED,
+        ),
+        K::Fortress => (
+            Some(K::Guard),
+            15,
+            modifiers(1.18, 0.92, 0.92, 1.1, 1.0, 1.0, 0.82, 35.0, 1.0, 2.0),
+            PassiveKind::Entrenched,
+            DEFENSE,
+        ),
+        K::Bulwark => (
+            Some(K::Guard),
+            15,
+            modifiers(1.05, 0.95, 1.0, 1.0, 1.0, 1.0, 0.90, 20.0, 0.5, 1.0),
+            PassiveKind::FrontalShield,
+            DEFENSE,
+        ),
+        K::Booster => (
+            Some(K::Flanker),
+            15,
+            modifiers(0.88, 0.82, 1.05, 1.0, 0.95, 1.0, 1.12, -10.0, 0.0, 0.0),
+            PassiveKind::BoosterRecoil,
+            MOBILITY,
+        ),
+        K::Fighter => (
+            Some(K::Flanker),
+            15,
+            modifiers(0.92, 0.78, 1.0, 0.9, 1.0, 1.0, 1.05, 0.0, 0.0, 0.0),
+            PassiveKind::HitSpeed,
+            MOBILITY,
+        ),
+    };
+    EvolutionDefinition {
+        kind,
+        parent,
+        level,
+        modifiers: values,
+        passive,
+        tags,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -118,7 +488,7 @@ impl EvolutionState {
 
     fn choose_active(&mut self, slot: usize) -> Option<EvolutionOption> {
         let level = self.active_level()?;
-        let option = *options_for_level(level)?.get(slot)?;
+        let option = *options_for_level(level, self.current_kind)?.get(slot)?;
         self.pending_levels.retain(|pending| *pending != level);
         self.current_name = option.name.to_string();
         self.current_kind = option.kind;
@@ -131,7 +501,7 @@ impl EvolutionState {
         let Some(active_level) = self.active_level() else {
             return false;
         };
-        let Some(slot) = options_for_level(active_level)
+        let Some(slot) = options_for_level(active_level, self.current_kind)
             .and_then(|options| options.iter().position(|option| option.kind == kind))
         else {
             return false;
@@ -141,16 +511,13 @@ impl EvolutionState {
     }
 
     pub fn body_scale(&self) -> f32 {
-        match self.current_kind {
+        match base_kind(self.current_kind) {
             EvolutionKind::Cannon => 1.04,
             EvolutionKind::Sniper => 0.92,
             EvolutionKind::Sprayer => 0.96,
             EvolutionKind::Guard => 0.88,
             EvolutionKind::Flanker => 0.95,
-            EvolutionKind::Tank
-            | EvolutionKind::Gunner
-            | EvolutionKind::TwinBarrel
-            | EvolutionKind::RamCore => 1.0,
+            _ => 1.0,
         }
     }
 
@@ -165,111 +532,103 @@ impl EvolutionState {
             EvolutionKind::Sprayer => &SPRAYER_BARRELS,
             EvolutionKind::Guard => &GUARD_BARRELS,
             EvolutionKind::Flanker => &FLANKER_BARRELS,
+            EvolutionKind::Minigun => &MINIGUN_BARRELS,
+            EvolutionKind::Stabilizer => &STABILIZER_BARRELS,
+            EvolutionKind::Annihilator => &ANNIHILATOR_BARRELS,
+            EvolutionKind::RailCannon => &RAIL_CANNON_BARRELS,
+            EvolutionKind::QuadBarrel => &QUAD_BARRELS,
+            EvolutionKind::Crossfire => &CROSSFIRE_BARRELS,
+            EvolutionKind::Marksman => &MARKSMAN_BARRELS,
+            EvolutionKind::Hunter => &HUNTER_BARRELS,
+            EvolutionKind::Juggernaut => &JUGGERNAUT_BARRELS,
+            EvolutionKind::Interceptor => &INTERCEPTOR_BARRELS,
+            EvolutionKind::PentaShot => &PENTA_BARRELS,
+            EvolutionKind::Needler => &NEEDLER_BARRELS,
+            EvolutionKind::Fortress => &FORTRESS_BARRELS,
+            EvolutionKind::Bulwark => &BULWARK_BARRELS,
+            EvolutionKind::Booster => &BOOSTER_BARRELS,
+            EvolutionKind::Fighter => &FIGHTER_BARRELS,
         }
     }
 
     pub fn reload_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Gunner => 0.72,
-            EvolutionKind::Cannon => 1.65,
-            EvolutionKind::TwinBarrel => 0.95,
-            EvolutionKind::Sniper => 1.18,
-            EvolutionKind::RamCore => 1.10,
-            EvolutionKind::Sprayer => 0.48,
-            EvolutionKind::Guard => 1.08,
-            EvolutionKind::Flanker => 0.92,
-            EvolutionKind::Tank => 1.0,
-        }
+        effective_modifiers(self.current_kind).reload
     }
 
     pub fn bullet_damage_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Gunner => 0.78,
-            EvolutionKind::Cannon => 2.35,
-            EvolutionKind::TwinBarrel => 0.82,
-            EvolutionKind::Sniper => 1.22,
-            EvolutionKind::RamCore => 0.55,
-            EvolutionKind::Sprayer => 0.52,
-            EvolutionKind::Guard => 0.85,
-            EvolutionKind::Flanker => 0.90,
-            EvolutionKind::Tank => 1.0,
-        }
+        effective_modifiers(self.current_kind).bullet_damage
     }
 
     pub fn bullet_speed_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Cannon => 0.86,
-            EvolutionKind::Sniper => 1.48,
-            EvolutionKind::Sprayer => 0.92,
-            EvolutionKind::Flanker => 1.05,
-            _ => 1.0,
-        }
+        effective_modifiers(self.current_kind).bullet_speed
     }
 
     pub fn bullet_knockback_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Cannon => 2.35,
-            EvolutionKind::Sniper => 1.2,
-            EvolutionKind::Sprayer => 0.75,
-            EvolutionKind::RamCore => 0.8,
-            _ => 1.0,
-        }
+        effective_modifiers(self.current_kind).knockback
     }
 
     pub fn projectile_lifetime_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Sniper => 1.70,
-            EvolutionKind::Cannon => 1.15,
-            EvolutionKind::Sprayer => 0.85,
-            _ => 1.0,
-        }
+        effective_modifiers(self.current_kind).lifetime
     }
 
     pub fn spread_radians(&self) -> f32 {
-        match self.current_kind {
+        let base = match base_kind(self.current_kind) {
             EvolutionKind::Gunner => 0.045,
             EvolutionKind::Sprayer => 0.24,
             EvolutionKind::Cannon => 0.025,
             EvolutionKind::Sniper => 0.006,
             _ => 0.0,
-        }
+        };
+        base * effective_modifiers(self.current_kind).spread
     }
 
     pub fn movement_multiplier(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::RamCore => 0.94,
-            EvolutionKind::Guard => 0.84,
-            EvolutionKind::Flanker => 1.22,
-            EvolutionKind::Sniper => 0.96,
-            _ => 1.0,
-        }
+        effective_modifiers(self.current_kind).movement
     }
 
     pub fn max_health_bonus(&self) -> i32 {
-        match self.current_kind {
-            EvolutionKind::RamCore => 45,
-            EvolutionKind::Guard => 55,
-            EvolutionKind::Flanker => -20,
-            EvolutionKind::Sniper => -10,
-            _ => 0,
-        }
+        effective_modifiers(self.current_kind)
+            .max_health_bonus
+            .round() as i32
     }
 
     pub fn health_regen_bonus(&self) -> f32 {
-        match self.current_kind {
-            EvolutionKind::Guard => 2.5,
-            EvolutionKind::RamCore => 0.6,
-            EvolutionKind::Flanker => -0.3,
-            _ => 0.0,
-        }
+        effective_modifiers(self.current_kind).health_regen_bonus
     }
 
     pub fn body_damage_bonus(&self) -> u32 {
-        match self.current_kind {
-            EvolutionKind::RamCore => 5,
-            EvolutionKind::Guard => 2,
-            _ => 0,
-        }
+        effective_modifiers(self.current_kind)
+            .body_damage_bonus
+            .max(0.0)
+            .round() as u32
+    }
+
+    pub fn passive(&self) -> PassiveKind {
+        definition(self.current_kind).passive
+    }
+
+    pub fn penetration_bonus(&self) -> u32 {
+        u32::from(self.current_kind == EvolutionKind::RailCannon) * 2
+    }
+
+    pub fn active_options(&self) -> Option<&'static [EvolutionOption]> {
+        options_for_level(self.active_level()?, self.current_kind)
+    }
+}
+
+fn effective_modifiers(kind: EvolutionKind) -> EvolutionModifiers {
+    let definition = definition(kind);
+    debug_assert_eq!(definition.kind, kind);
+    definition.parent.map_or(definition.modifiers, |parent| {
+        effective_modifiers(parent).compose(definition.modifiers)
+    })
+}
+
+fn base_kind(kind: EvolutionKind) -> EvolutionKind {
+    let definition = definition(kind);
+    match definition.parent {
+        Some(EvolutionKind::Tank) | None => kind,
+        Some(parent) => base_kind(parent),
     }
 }
 
@@ -289,7 +648,7 @@ const BODY_COLOR: [f32; 4] = [0.08, 0.70, 0.84, 1.0];
 const BODY_RING_COLOR: [f32; 4] = [0.05, 0.48, 0.60, 1.0];
 const RAM_COLOR: [f32; 4] = [0.28, 0.28, 0.28, 1.0];
 
-pub const MAX_BARRELS: usize = 3;
+pub const MAX_BARRELS: usize = 5;
 
 const TANK_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
     angle_offset: 0.0,
@@ -386,6 +745,176 @@ const FLANKER_BARRELS: [BarrelSpec; 2] = [
         width: 5.0,
         length: 24.0,
         damage_multiplier: 0.72,
+    },
+];
+const MINIGUN_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 7.0,
+    length: 34.0,
+    ..GUNNER_BARRELS[0]
+}];
+const STABILIZER_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 5.2,
+    length: 40.0,
+    ..GUNNER_BARRELS[0]
+}];
+const ANNIHILATOR_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 15.5,
+    length: 34.0,
+    ..CANNON_BARRELS[0]
+}];
+const RAIL_CANNON_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 4.0,
+    length: 50.0,
+    ..CANNON_BARRELS[0]
+}];
+const QUAD_BARRELS: [BarrelSpec; 4] = [
+    BarrelSpec {
+        lateral_offset: -9.0,
+        damage_multiplier: 0.58,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        lateral_offset: -3.0,
+        damage_multiplier: 0.58,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        lateral_offset: 3.0,
+        damage_multiplier: 0.58,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        lateral_offset: 9.0,
+        damage_multiplier: 0.58,
+        ..TWIN_BARRELS[0]
+    },
+];
+const CROSSFIRE_BARRELS: [BarrelSpec; 4] = [
+    BarrelSpec {
+        lateral_offset: -5.0,
+        damage_multiplier: 0.72,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        lateral_offset: 5.0,
+        damage_multiplier: 0.72,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: std::f32::consts::PI,
+        lateral_offset: -5.0,
+        damage_multiplier: 0.55,
+        ..TWIN_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: std::f32::consts::PI,
+        lateral_offset: 5.0,
+        damage_multiplier: 0.55,
+        ..TWIN_BARRELS[0]
+    },
+];
+const MARKSMAN_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 4.2,
+    length: 53.0,
+    ..SNIPER_BARRELS[0]
+}];
+const HUNTER_BARRELS: [BarrelSpec; 2] = [
+    BarrelSpec {
+        lateral_offset: -4.0,
+        damage_multiplier: 0.72,
+        ..SNIPER_BARRELS[0]
+    },
+    BarrelSpec {
+        lateral_offset: 4.0,
+        damage_multiplier: 0.72,
+        ..SNIPER_BARRELS[0]
+    },
+];
+const JUGGERNAUT_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 5.0,
+    length: 24.0,
+    ..RAM_CORE_BARRELS[0]
+}];
+const INTERCEPTOR_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 6.0,
+    length: 28.0,
+    ..RAM_CORE_BARRELS[0]
+}];
+const PENTA_BARRELS: [BarrelSpec; 5] = [
+    BarrelSpec {
+        angle_offset: -0.32,
+        lateral_offset: -8.0,
+        damage_multiplier: 0.48,
+        ..SPRAYER_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: -0.16,
+        lateral_offset: -4.0,
+        damage_multiplier: 0.48,
+        ..SPRAYER_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: 0.0,
+        lateral_offset: 0.0,
+        damage_multiplier: 0.48,
+        ..SPRAYER_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: 0.16,
+        lateral_offset: 4.0,
+        damage_multiplier: 0.48,
+        ..SPRAYER_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: 0.32,
+        lateral_offset: 8.0,
+        damage_multiplier: 0.48,
+        ..SPRAYER_BARRELS[0]
+    },
+];
+const NEEDLER_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 4.0,
+    length: 35.0,
+    damage_multiplier: 1.0,
+    ..SPRAYER_BARRELS[0]
+}];
+const FORTRESS_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 8.0,
+    length: 30.0,
+    ..GUARD_BARRELS[0]
+}];
+const BULWARK_BARRELS: [BarrelSpec; 1] = [BarrelSpec {
+    width: 6.5,
+    length: 31.0,
+    ..GUARD_BARRELS[0]
+}];
+const BOOSTER_BARRELS: [BarrelSpec; 3] = [
+    FLANKER_BARRELS[0],
+    BarrelSpec {
+        angle_offset: std::f32::consts::PI,
+        lateral_offset: -5.0,
+        damage_multiplier: 0.62,
+        ..FLANKER_BARRELS[1]
+    },
+    BarrelSpec {
+        angle_offset: std::f32::consts::PI,
+        lateral_offset: 5.0,
+        damage_multiplier: 0.62,
+        ..FLANKER_BARRELS[1]
+    },
+];
+const FIGHTER_BARRELS: [BarrelSpec; 4] = [
+    FLANKER_BARRELS[0],
+    FLANKER_BARRELS[1],
+    BarrelSpec {
+        angle_offset: std::f32::consts::FRAC_PI_2,
+        damage_multiplier: 0.58,
+        ..FLANKER_BARRELS[0]
+    },
+    BarrelSpec {
+        angle_offset: -std::f32::consts::FRAC_PI_2,
+        damage_multiplier: 0.58,
+        ..FLANKER_BARRELS[0]
     },
 ];
 
@@ -610,6 +1139,167 @@ const LEVEL_5_OPTIONS: [EvolutionOption; MAX_OPTIONS] = [
     },
 ];
 
+macro_rules! advanced_option {
+    ($name:literal, $kind:ident, $description:literal, $parts:ident, $scale:expr, $color:expr) => {
+        EvolutionOption {
+            name: $name,
+            kind: EvolutionKind::$kind,
+            description: $description,
+            background: $color,
+            lower_background: [$color[0] * 0.72, $color[1] * 0.72, $color[2] * 0.72, 1.0],
+            visual: TankVisual {
+                body_scale: $scale,
+                parts: &$parts,
+            },
+        }
+    };
+}
+
+const GUNNER_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Minigun",
+        Minigun,
+        "Sustained fire spins up by 25%, at the cost of growing spread.",
+        GUNNER_PARTS,
+        1.0,
+        [0.34, 0.87, 0.72, 1.0]
+    ),
+    advanced_option!(
+        "Stabilizer",
+        Stabilizer,
+        "Slow down to gain a much tighter, faster stream.",
+        SNIPER_PARTS,
+        1.0,
+        [0.42, 0.78, 0.92, 1.0]
+    ),
+];
+const CANNON_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Annihilator",
+        Annihilator,
+        "Huge slow shells create a falloff blast on impact.",
+        CANNON_PARTS,
+        1.08,
+        [0.95, 0.35, 0.32, 1.0]
+    ),
+    advanced_option!(
+        "Rail Cannon",
+        RailCannon,
+        "Thin penetrators accelerate damage over long travel distance.",
+        SNIPER_PARTS,
+        1.0,
+        [0.78, 0.52, 0.94, 1.0]
+    ),
+];
+const TWIN_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Quad Barrel",
+        QuadBarrel,
+        "Alternating paired volleys maintain steady forward pressure.",
+        TWIN_PARTS,
+        1.0,
+        [0.32, 0.82, 0.88, 1.0]
+    ),
+    advanced_option!(
+        "Crossfire",
+        Crossfire,
+        "Forward and rear pairs punish pursuers with heavy knockback.",
+        FLANKER_PARTS,
+        1.0,
+        [0.45, 0.72, 0.92, 1.0]
+    ),
+];
+const SNIPER_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Marksman",
+        Marksman,
+        "Damage rises with projectile travel distance.",
+        SNIPER_PARTS,
+        0.90,
+        [0.45, 0.92, 0.34, 1.0]
+    ),
+    advanced_option!(
+        "Hunter",
+        Hunter,
+        "Mark a target, then punish it with two stronger follow-up hits.",
+        TWIN_PARTS,
+        0.94,
+        [0.66, 0.89, 0.34, 1.0]
+    ),
+];
+const RAM_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Juggernaut",
+        Juggernaut,
+        "Momentum increases body damage and contact resistance.",
+        RAM_CORE_PARTS,
+        1.10,
+        [0.38, 0.52, 0.94, 1.0]
+    ),
+    advanced_option!(
+        "Interceptor",
+        Interceptor,
+        "A visible frontal armor arc reduces incoming projectile damage.",
+        GUARD_PARTS,
+        1.02,
+        [0.35, 0.65, 0.95, 1.0]
+    ),
+];
+const SPRAYER_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Penta Shot",
+        PentaShot,
+        "A phased five-shot fan fills gaps and controls space.",
+        SPRAYER_PARTS,
+        0.98,
+        [0.98, 0.65, 0.22, 1.0]
+    ),
+    advanced_option!(
+        "Needler",
+        Needler,
+        "Repeated hits on one target ramp damage to five stacks.",
+        GUNNER_PARTS,
+        0.94,
+        [0.94, 0.78, 0.25, 1.0]
+    ),
+];
+const GUARD_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Fortress",
+        Fortress,
+        "Settle and stop firing to gain regeneration and damage reduction.",
+        GUARD_PARTS,
+        0.92,
+        [0.61, 0.39, 0.92, 1.0]
+    ),
+    advanced_option!(
+        "Bulwark",
+        Bulwark,
+        "A frontal shield absorbs projectiles and recharges out of combat.",
+        GUARD_PARTS,
+        0.90,
+        [0.50, 0.42, 0.91, 1.0]
+    ),
+];
+const FLANKER_ADVANCED: [EvolutionOption; 2] = [
+    advanced_option!(
+        "Booster",
+        Booster,
+        "Rear fire adds forward acceleration up to a controlled cap.",
+        FLANKER_PARTS,
+        0.94,
+        [0.96, 0.84, 0.35, 1.0]
+    ),
+    advanced_option!(
+        "Fighter",
+        Fighter,
+        "All-side coverage and confirmed hits trigger short speed bursts.",
+        FLANKER_PARTS,
+        0.96,
+        [0.91, 0.74, 0.28, 1.0]
+    ),
+];
+
 pub fn setup_evolution_menu(mut commands: Commands) {
     commands
         .spawn((
@@ -649,7 +1339,8 @@ pub fn setup_evolution_menu(mut commands: Commands) {
                     ..default()
                 })
                 .with_children(|row| {
-                    for slot in row_start..(row_start + 2).min(MAX_OPTIONS) {
+                    for (slot, option) in LEVEL_5_OPTIONS.iter().enumerate().skip(row_start).take(2)
+                    {
                         row.spawn((
                             Button,
                             EvolutionOptionButton { slot },
@@ -658,9 +1349,9 @@ pub fn setup_evolution_menu(mut commands: Commands) {
                             BorderColor::all(Color::srgba(0.33, 0.34, 0.35, 1.0)),
                         ))
                         .with_children(|card| {
-                            spawn_card_background(card, LEVEL_5_OPTIONS[slot]);
-                            spawn_tank_visual(card, LEVEL_5_OPTIONS[slot].visual);
-                            spawn_card_label(card, LEVEL_5_OPTIONS[slot].name);
+                            spawn_card_background(card, *option);
+                            spawn_tank_visual(card, option.visual);
+                            spawn_card_label(card, option.name);
                         });
                     }
                 });
@@ -890,12 +1581,9 @@ pub fn queue_evolution_choices(level: Res<Level>, mut state: ResMut<EvolutionSta
 pub fn update_evolution_menu(
     phase: Res<GamePhase>,
     state: Res<EvolutionState>,
-    mut root: Query<&mut Visibility, With<EvolutionMenuRoot>>,
+    mut root: Query<&mut Visibility, (With<EvolutionMenuRoot>, Without<EvolutionOptionButton>)>,
+    mut cards: Query<&mut Visibility, (With<EvolutionOptionButton>, Without<EvolutionMenuRoot>)>,
 ) {
-    if !(phase.is_changed() || state.is_changed()) {
-        return;
-    }
-
     let visible = *phase == GamePhase::Playing && state.active_level().is_some();
     for mut visibility in root.iter_mut() {
         *visibility = if visible {
@@ -903,6 +1591,42 @@ pub fn update_evolution_menu(
         } else {
             Visibility::Hidden
         };
+    }
+    if !visible {
+        for mut visibility in &mut cards {
+            *visibility = Visibility::Hidden;
+        }
+    }
+}
+
+pub fn refresh_evolution_cards(
+    mut commands: Commands,
+    phase: Res<GamePhase>,
+    state: Res<EvolutionState>,
+    mut buttons: Query<(Entity, &EvolutionOptionButton, &mut Visibility), With<Button>>,
+) {
+    if !state.is_changed() {
+        return;
+    }
+    if *phase != GamePhase::Playing || state.active_level().is_none() {
+        for (_, _, mut visibility) in &mut buttons {
+            *visibility = Visibility::Hidden;
+        }
+        return;
+    }
+    let options = state.active_options().unwrap_or(&LEVEL_5_OPTIONS);
+    for (entity, button, mut visibility) in &mut buttons {
+        let Some(option) = options.get(button.slot).copied() else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        *visibility = Visibility::Visible;
+        commands.entity(entity).despawn_related::<Children>();
+        commands.entity(entity).with_children(|card| {
+            spawn_card_background(card, option);
+            spawn_tank_visual(card, option.visual);
+            spawn_card_label(card, option.name);
+        });
     }
 }
 
@@ -944,7 +1668,7 @@ pub fn update_evolution_hover_description(
     let hovered = buttons
         .iter()
         .find(|(interaction, _)| **interaction == Interaction::Hovered)
-        .and_then(|(_, button)| LEVEL_5_OPTIONS.get(button.slot));
+        .and_then(|(_, button)| state.active_options()?.get(button.slot));
 
     for (mut text, mut visibility) in descriptions.iter_mut() {
         if let Some(option) = hovered {
@@ -956,11 +1680,30 @@ pub fn update_evolution_hover_description(
     }
 }
 
-fn options_for_level(level: u32) -> Option<&'static [EvolutionOption]> {
+fn options_for_level(
+    level: u32,
+    current_kind: EvolutionKind,
+) -> Option<&'static [EvolutionOption]> {
     match level {
         LEVEL_5 => Some(&LEVEL_5_OPTIONS),
+        LEVEL_15 => match current_kind {
+            EvolutionKind::Gunner => Some(&GUNNER_ADVANCED),
+            EvolutionKind::Cannon => Some(&CANNON_ADVANCED),
+            EvolutionKind::TwinBarrel => Some(&TWIN_ADVANCED),
+            EvolutionKind::Sniper => Some(&SNIPER_ADVANCED),
+            EvolutionKind::RamCore => Some(&RAM_ADVANCED),
+            EvolutionKind::Sprayer => Some(&SPRAYER_ADVANCED),
+            EvolutionKind::Guard => Some(&GUARD_ADVANCED),
+            EvolutionKind::Flanker => Some(&FLANKER_ADVANCED),
+            _ => None,
+        },
         _ => None,
     }
+}
+
+pub fn advanced_kinds(parent: EvolutionKind) -> Option<[EvolutionKind; 2]> {
+    let options = options_for_level(LEVEL_15, parent)?;
+    Some([options[0].kind, options[1].kind])
 }
 
 #[cfg(test)]
@@ -968,13 +1711,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_level_five_queues_evolution() {
+    fn level_five_and_fifteen_queue_once() {
         let mut state = EvolutionState::default();
 
         state.queue_reached_levels(100);
         state.queue_reached_levels(100);
 
-        assert_eq!(state.pending_levels, vec![5]);
+        assert_eq!(state.pending_levels, vec![5, 15]);
     }
 
     #[test]
@@ -992,20 +1735,69 @@ mod tests {
     }
 
     #[test]
-    fn only_level_five_has_options_for_now() {
-        assert_eq!(options_for_level(5).unwrap().len(), 8);
-        assert!(options_for_level(15).is_none());
-        assert!(options_for_level(100).is_none());
+    fn level_fifteen_options_follow_parent_branch() {
+        assert_eq!(options_for_level(5, EvolutionKind::Tank).unwrap().len(), 8);
+        assert_eq!(
+            options_for_level(15, EvolutionKind::Gunner).unwrap().len(),
+            2
+        );
+        assert_eq!(
+            options_for_level(15, EvolutionKind::Gunner).unwrap()[0].kind,
+            EvolutionKind::Minigun
+        );
+        assert!(options_for_level(15, EvolutionKind::Tank).is_none());
+        assert!(options_for_level(100, EvolutionKind::Tank).is_none());
     }
 
     #[test]
     fn level_five_evolutions_have_supported_barrel_counts() {
         for option in LEVEL_5_OPTIONS {
-            let mut state = EvolutionState::default();
-            state.current_kind = option.kind;
+            let state = EvolutionState {
+                current_kind: option.kind,
+                ..default()
+            };
 
             assert!(!state.barrel_specs().is_empty());
             assert!(state.barrel_specs().len() <= MAX_BARRELS);
         }
+    }
+
+    #[test]
+    fn every_advanced_evolution_has_a_valid_parent_and_barrels() {
+        for options in [
+            &GUNNER_ADVANCED,
+            &CANNON_ADVANCED,
+            &TWIN_ADVANCED,
+            &SNIPER_ADVANCED,
+            &RAM_ADVANCED,
+            &SPRAYER_ADVANCED,
+            &GUARD_ADVANCED,
+            &FLANKER_ADVANCED,
+        ] {
+            for option in options {
+                let definition = definition(option.kind);
+                let state = EvolutionState {
+                    current_kind: option.kind,
+                    ..default()
+                };
+                assert_eq!(definition.level, 15);
+                assert!(definition.parent.is_some());
+                assert!(!state.barrel_specs().is_empty());
+                assert!(state.barrel_specs().len() <= MAX_BARRELS);
+            }
+        }
+    }
+
+    #[test]
+    fn sprayer_preserves_fractional_projectile_damage() {
+        let state = EvolutionState {
+            current_kind: EvolutionKind::Sprayer,
+            ..default()
+        };
+        assert!(
+            (crate::constants::BASE_PROJECTILE_DAMAGE * state.bullet_damage_multiplier() - 1.05)
+                .abs()
+                < 0.0001
+        );
     }
 }

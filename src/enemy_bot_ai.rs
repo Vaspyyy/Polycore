@@ -1,20 +1,24 @@
 use crate::{
-    combat::TANK_KILL_XP,
     constants,
+    dominance::{DominanceState, LeaderChallenger},
     enemy_bot::{
         EnemyBot, EnemyBotBrain, EnemyBotDamageCooldown, EnemyBotEvolution, EnemyBotHealProgress,
         EnemyBotHealth, EnemyBotLevel, EnemyBotMoveVelocity, EnemyBotPlaystyle,
         EnemyBotRespawnTimer, EnemyBotSpawnPosition, EnemyBotTargetKind, EnemyBotTurret,
-        EnemyBotUpgrades, EnemyBotVelocity, enemy_bot_barrel_transform,
-        random_enemy_bot_spawn_position,
+        EnemyBotUpgrades, EnemyBotVelocity, EnemyBotXp, enemy_bot_barrel_transform,
     },
+    palette::{BotPalette, PaletteMaterials},
+    passive::{PassiveRuntime, ShotAdjustments},
     player::{self, MoveVelocity, Player, PlayerHealth, Velocity},
     projectile::{
-        Lifetime, Projectile, ProjectileDamage, ProjectileKnockback, ProjectileOwner,
-        ProjectilePenetration, ShootCooldown,
+        Lifetime, Projectile, ProjectileAssets, ProjectileDamage, ProjectileEvolution,
+        ProjectileHitHistory, ProjectileKnockback, ProjectileOwner, ProjectilePenetration,
+        ProjectileRear, ProjectileSplashReady, ProjectileTravel, ShootCooldown,
     },
     rng::Rng,
-    shape::{Health, Level, Shape, XpValue},
+    shape::{Health, Level, MaxHealth, Shape, XpValue},
+    spatial::{SpatialGrid, SpatialKind},
+    tank::{ProjectileCorridor, RecentDamage, SpawnProtection},
 };
 use bevy::prelude::*;
 
@@ -27,6 +31,7 @@ const LOW_HEALTH_THREAT_RADIUS_MULTIPLIER: f32 = 1.35;
 const LOW_HEALTH_MIN_THREAT_RADIUS: f32 = 360.0;
 const SHAPE_FARM_DISTANCE: f32 = 260.0;
 const SHAPE_FARM_RETREAT_DISTANCE: f32 = 155.0;
+const STRATEGIC_DECISION_INTERVAL: f32 = 0.125;
 
 #[derive(Clone, Copy)]
 struct PlaystyleTuning {
@@ -38,8 +43,6 @@ struct PlaystyleTuning {
     turn_speed: f32,
     aim_tolerance: f32,
     lead_factor: f32,
-    decision_min: f32,
-    decision_variance: f32,
     combat_threshold: f32,
     pursuit_leash: f32,
     personal_space: f32,
@@ -61,8 +64,6 @@ impl EnemyBotPlaystyle {
                 turn_speed: 5.8,
                 aim_tolerance: 0.20,
                 lead_factor: 0.45,
-                decision_min: 0.34,
-                decision_variance: 0.30,
                 combat_threshold: 1.10,
                 pursuit_leash: 430.0,
                 personal_space: 270.0,
@@ -80,8 +81,6 @@ impl EnemyBotPlaystyle {
                 turn_speed: 4.4,
                 aim_tolerance: 0.065,
                 lead_factor: 1.0,
-                decision_min: 0.52,
-                decision_variance: 0.38,
                 combat_threshold: 1.35,
                 pursuit_leash: 610.0,
                 personal_space: 420.0,
@@ -99,8 +98,6 @@ impl EnemyBotPlaystyle {
                 turn_speed: 4.0,
                 aim_tolerance: 0.24,
                 lead_factor: 0.30,
-                decision_min: 0.62,
-                decision_variance: 0.38,
                 combat_threshold: 1.05,
                 pursuit_leash: 390.0,
                 personal_space: 235.0,
@@ -118,8 +115,6 @@ impl EnemyBotPlaystyle {
                 turn_speed: 4.8,
                 aim_tolerance: 0.11,
                 lead_factor: 0.72,
-                decision_min: 0.45,
-                decision_variance: 0.30,
                 combat_threshold: 1.60,
                 pursuit_leash: 450.0,
                 personal_space: 340.0,
@@ -137,8 +132,6 @@ impl EnemyBotPlaystyle {
                 turn_speed: 6.8,
                 aim_tolerance: 0.13,
                 lead_factor: 0.82,
-                decision_min: 0.24,
-                decision_variance: 0.24,
                 combat_threshold: 1.25,
                 pursuit_leash: 500.0,
                 personal_space: 310.0,
@@ -161,21 +154,28 @@ struct TargetSnapshot {
     current_health: f32,
     level: u32,
     reward: u32,
+    dps: f32,
+    effective_health: f32,
+    evolution_power: f32,
+    recent_damage: f32,
+    is_leader: bool,
 }
 
-pub(crate) struct ProjectileAssets {
-    mesh: Handle<Mesh>,
-    material: Handle<ColorMaterial>,
-}
-
+#[allow(clippy::type_complexity)]
 pub fn respawn_enemy_bots(
     time: Res<Time>,
     mut rng: ResMut<Rng>,
-    player: Query<&Transform, (With<Player>, Without<EnemyBot>)>,
+    player: Query<(&Transform, &PlayerHealth), (With<Player>, Without<EnemyBot>)>,
+    shapes: Query<&Transform, (With<Shape>, Without<EnemyBot>, Without<Player>)>,
+    projectiles: Query<
+        (&Transform, &Velocity),
+        (With<Projectile>, Without<EnemyBot>, Without<Player>),
+    >,
     mut bots: ParamSet<(
         Query<(Entity, &Transform, &EnemyBotHealth), With<EnemyBot>>,
         Query<
             (
+                Entity,
                 &mut Transform,
                 &mut Visibility,
                 &mut EnemyBotHealth,
@@ -190,20 +190,51 @@ pub fn respawn_enemy_bots(
             ),
             With<EnemyBot>,
         >,
+        Query<
+            (
+                &mut EnemyBotHealth,
+                &mut EnemyBotXp,
+                &mut EnemyBotLevel,
+                &mut EnemyBotUpgrades,
+                &mut EnemyBotEvolution,
+                &mut crate::combat::CombatStats,
+                &mut SpawnProtection,
+                &mut PassiveRuntime,
+            ),
+            With<EnemyBot>,
+        >,
     )>,
 ) {
     let player_pos = player
         .single()
-        .map(|transform| transform.translation.xy())
-        .unwrap_or(Vec2::ZERO);
+        .map_or(Vec2::ZERO, |(transform, _)| transform.translation.xy());
     let mut occupied_positions = bots
         .p0()
         .iter()
-        .filter(|(_, _, health)| health.current > 0)
+        .filter(|(_, _, health)| health.current > 0.0)
         .map(|(_, transform, _)| transform.translation.xy())
         .collect::<Vec<_>>();
+    if player
+        .single()
+        .is_ok_and(|(_, health)| health.current > 0.0)
+    {
+        occupied_positions.push(player_pos);
+    }
+    let shape_positions = shapes
+        .iter()
+        .map(|transform| transform.translation.xy())
+        .collect::<Vec<_>>();
+    let corridors = projectiles
+        .iter()
+        .map(|(transform, velocity)| ProjectileCorridor {
+            start: transform.translation.xy(),
+            end: transform.translation.xy() + velocity.0,
+        })
+        .collect::<Vec<_>>();
 
+    let mut respawned = Vec::new();
     for (
+        bot_entity,
         mut transform,
         mut visibility,
         mut health,
@@ -217,7 +248,7 @@ pub fn respawn_enemy_bots(
         mut spawn_position,
     ) in bots.p1().iter_mut()
     {
-        if health.current > 0 || respawn_timer.0 <= 0.0 {
+        if health.current > 0.0 || respawn_timer.0 <= 0.0 {
             continue;
         }
 
@@ -226,7 +257,8 @@ pub fn respawn_enemy_bots(
             continue;
         }
 
-        let position = random_enemy_bot_spawn_position(&mut rng, &occupied_positions, player_pos);
+        let position =
+            crate::tank::safe_spawn(&mut rng, &occupied_positions, &shape_positions, &corridors);
         occupied_positions.push(position);
         spawn_position.0 = position;
         transform.translation = position.extend(0.0);
@@ -238,19 +270,51 @@ pub fn respawn_enemy_bots(
         heal_progress.0 = 0.0;
         shoot_cooldown.0 = 0.35;
         brain.reset();
+        brain.decision_timer = rng.range_f32(0.0, 0.125);
+        brain.truce_timer = 2.5;
         *visibility = Visibility::Visible;
+        respawned.push(bot_entity);
+    }
+
+    let mut progression_query = bots.p2();
+    for entity in respawned {
+        let Ok((
+            mut health,
+            mut xp,
+            mut level,
+            mut upgrades,
+            mut evolution,
+            mut stats,
+            mut protection,
+            mut passive_runtime,
+        )) = progression_query.get_mut(entity)
+        else {
+            continue;
+        };
+        xp.0 = 0;
+        level.0 = 1;
+        upgrades.0.reset();
+        evolution.0.reset();
+        health.max = crate::enemy_bot::enemy_bot_max_health(&upgrades.0, &evolution.0);
+        health.current = health.max;
+        crate::combat::reset_life_stats(&mut stats);
+        protection.remaining = constants::SPAWN_PROTECTION_SECS;
+        passive_runtime.reset_for_life();
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn enemy_bot_ai_update(
     mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
-    mut projectile_assets: Local<Option<ProjectileAssets>>,
+    projectile_assets: Res<ProjectileAssets>,
+    palette_materials: Res<PaletteMaterials>,
     time: Res<Time>,
     mut rng: ResMut<Rng>,
     player_level: Res<Level>,
+    player_upgrades: Res<crate::hud::UpgradeState>,
+    player_evolution: Res<crate::evolution::EvolutionState>,
+    grid: Res<SpatialGrid>,
+    dominance: Res<DominanceState>,
     mut bots: ParamSet<(
         Query<
             (
@@ -260,6 +324,10 @@ pub fn enemy_bot_ai_update(
                 &EnemyBotLevel,
                 &EnemyBotMoveVelocity,
                 &EnemyBotVelocity,
+                &EnemyBotUpgrades,
+                &EnemyBotEvolution,
+                &crate::combat::CombatStats,
+                &RecentDamage,
             ),
             (With<EnemyBot>, Without<EnemyBotTurret>),
         >,
@@ -275,88 +343,119 @@ pub fn enemy_bot_ai_update(
                 &EnemyBotUpgrades,
                 &EnemyBotEvolution,
                 &mut ShootCooldown,
-                &Children,
                 &EnemyBotPlaystyle,
                 &EnemyBotLevel,
                 &mut EnemyBotBrain,
+                &mut SpawnProtection,
             ),
             (With<EnemyBot>, Without<EnemyBotTurret>),
         >,
     )>,
     player: Query<
-        (Entity, &Transform, &PlayerHealth, &MoveVelocity, &Velocity),
+        (
+            Entity,
+            &Transform,
+            &PlayerHealth,
+            &MoveVelocity,
+            &Velocity,
+            &crate::combat::CombatStats,
+            &RecentDamage,
+        ),
         (With<Player>, Without<EnemyBot>, Without<EnemyBotTurret>),
     >,
     shapes: Query<
-        (Entity, &Transform, &Health, &XpValue),
+        (Entity, &Transform, &Health, &MaxHealth, &XpValue),
         (With<Shape>, Without<EnemyBot>, Without<EnemyBotTurret>),
     >,
     projectiles: Query<
-        (&Transform, &Velocity, &ProjectileOwner),
+        (Entity, &Transform, &Velocity, &ProjectileOwner),
         (With<Projectile>, Without<EnemyBot>, Without<EnemyBotTurret>),
+    >,
+    mut bot_context: Query<
+        (&BotPalette, Option<&LeaderChallenger>, &mut PassiveRuntime),
+        With<EnemyBot>,
     >,
     mut turrets: Query<(&mut Transform, &mut Visibility, &EnemyBotTurret), Without<EnemyBot>>,
 ) {
-    let assets = projectile_assets.get_or_insert_with(|| ProjectileAssets {
-        mesh: meshes.add(Circle::new(constants::PROJECTILE_RADIUS)),
-        material: materials.add(Color::srgba(
-            constants::PROJECTILE_COLOR[0],
-            constants::PROJECTILE_COLOR[1],
-            constants::PROJECTILE_COLOR[2],
-            constants::PROJECTILE_COLOR[3],
-        )),
-    });
     let dt = time.delta_secs();
-    let half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
     let damping = (1.0 - constants::PLAYER_KNOCKBACK_DAMPING * dt).clamp(0.0, 1.0);
 
     let mut combat_targets = Vec::new();
-    if let Ok((entity, transform, health, move_velocity, knockback_velocity)) = player.single()
-        && health.current > 0
+    if let Ok((entity, transform, health, move_velocity, knockback_velocity, stats, recent)) =
+        player.single()
+        && health.current > 0.0
     {
         combat_targets.push(TargetSnapshot {
             entity,
             kind: EnemyBotTargetKind::Combatant,
             position: transform.translation.xy(),
             velocity: move_velocity.0 + knockback_velocity.0,
-            health_fraction: health.current as f32 / health.max.max(1) as f32,
-            current_health: health.current as f32,
+            health_fraction: health.current / health.max.max(1.0),
+            current_health: health.current,
             level: player_level.0,
-            reward: TANK_KILL_XP,
+            reward: crate::combat::kill_xp(stats.life_score),
+            dps: tank_damage_per_second(&player_upgrades, &player_evolution),
+            effective_health: health.current,
+            evolution_power: evolution_power(&player_evolution),
+            recent_damage: recent.amount,
+            is_leader: dominance.leader == Some(entity),
         });
     }
     combat_targets.extend(
         bots.p0()
             .iter()
-            .filter(|(_, _, health, _, _, _)| health.current > 0)
+            .filter(|(_, _, health, ..)| health.current > 0.0)
             .map(
-                |(entity, transform, health, level, move_velocity, knockback_velocity)| {
+                |(
+                    entity,
+                    transform,
+                    health,
+                    level,
+                    move_velocity,
+                    knockback_velocity,
+                    upgrades,
+                    evolution,
+                    stats,
+                    recent,
+                )| {
                     TargetSnapshot {
                         entity,
                         kind: EnemyBotTargetKind::Combatant,
                         position: transform.translation.xy(),
                         velocity: move_velocity.0 + knockback_velocity.0,
-                        health_fraction: health.current as f32 / health.max.max(1) as f32,
-                        current_health: health.current as f32,
+                        health_fraction: health.current / health.max.max(1.0),
+                        current_health: health.current,
                         level: level.0,
-                        reward: TANK_KILL_XP,
+                        reward: crate::combat::kill_xp(stats.life_score),
+                        dps: bot_damage_per_second(upgrades, evolution),
+                        effective_health: health.current,
+                        evolution_power: evolution_power(&evolution.0),
+                        recent_damage: recent.amount,
+                        is_leader: dominance.leader == Some(entity),
                     }
                 },
             ),
     );
     let shape_targets = shapes
         .iter()
-        .filter(|(_, _, health, _)| health.0 > 0)
-        .map(|(entity, transform, health, xp)| TargetSnapshot {
-            entity,
-            kind: EnemyBotTargetKind::Shape,
-            position: transform.translation.xy(),
-            velocity: Vec2::ZERO,
-            health_fraction: (health.0 as f32 / 16.0).clamp(0.0, 1.0),
-            current_health: health.0 as f32,
-            level: 0,
-            reward: xp.0,
-        })
+        .filter(|(_, _, health, _, _)| health.0 > 0.0)
+        .map(
+            |(entity, transform, health, max_health, xp)| TargetSnapshot {
+                entity,
+                kind: EnemyBotTargetKind::Shape,
+                position: transform.translation.xy(),
+                velocity: Vec2::ZERO,
+                health_fraction: (health.0 / max_health.0.max(1.0)).clamp(0.0, 1.0),
+                current_health: health.0,
+                level: 0,
+                reward: xp.0,
+                dps: 0.0,
+                effective_health: health.0,
+                evolution_power: 0.0,
+                recent_damage: 0.0,
+                is_leader: false,
+            },
+        )
         .collect::<Vec<_>>();
 
     for (
@@ -370,13 +469,13 @@ pub fn enemy_bot_ai_update(
         upgrades,
         evolution,
         mut shoot_cooldown,
-        children,
         playstyle,
         bot_level,
         mut brain,
+        mut protection,
     ) in bots.p1().iter_mut()
     {
-        if health.current == 0 {
+        if health.current <= 0.0 {
             move_velocity.0 = Vec2::ZERO;
             continue;
         }
@@ -388,22 +487,56 @@ pub fn enemy_bot_ai_update(
         tick_brain(&mut brain, dt);
         update_flee_state(
             &mut brain.fleeing,
-            health.current as f32 / health.max.max(1) as f32,
+            health.current / health.max.max(1.0),
             tuning.flee_threshold,
         );
         update_strafe(&mut brain, &mut rng);
 
         let bot_pos = transform.translation.xy();
-        let visible_combat = combat_targets
+        let nearby_entries = grid.nearby(bot_pos, tuning.view_range.max(1_000.0));
+        let mut visible_combat = combat_targets
             .iter()
             .copied()
             .filter(|target| {
                 target.entity != bot_entity
+                    && nearby_entries.iter().any(|entry| {
+                        entry.entity == target.entity && entry.kind == SpatialKind::Tank
+                    })
                     && target.position.distance_squared(bot_pos)
                         <= tuning.view_range * tuning.view_range
             })
             .collect::<Vec<_>>();
-        let movement_speed = upgrades.0.movement_speed() * evolution.0.movement_multiplier();
+        let challenge_target = bot_context
+            .get(bot_entity)
+            .ok()
+            .and_then(|(_, challenge, _)| challenge)
+            .and_then(|challenge| {
+                combat_targets
+                    .iter()
+                    .copied()
+                    .find(|target| target.entity == challenge.target)
+            });
+        if let Some(target) = challenge_target
+            && !visible_combat
+                .iter()
+                .any(|visible| visible.entity == target.entity)
+        {
+            visible_combat.push(target);
+        }
+        let visible_shapes = shape_targets
+            .iter()
+            .copied()
+            .filter(|target| {
+                nearby_entries
+                    .iter()
+                    .any(|entry| entry.entity == target.entity && entry.kind == SpatialKind::Shape)
+            })
+            .collect::<Vec<_>>();
+        let passive_movement = bot_context.get(bot_entity).map_or(1.0, |(_, _, runtime)| {
+            crate::passive::movement_multiplier(runtime, evolution.0.passive())
+        });
+        let movement_speed =
+            upgrades.0.movement_speed() * evolution.0.movement_multiplier() * passive_movement;
         let damage_per_second = bot_damage_per_second(upgrades, evolution);
         let low_health_threat_radius = (tuning.personal_space
             * LOW_HEALTH_THREAT_RADIUS_MULTIPLIER)
@@ -413,9 +546,19 @@ pub fn enemy_bot_ai_update(
             .copied()
             .filter(|target| bot_pos.distance(target.position) <= low_health_threat_radius)
             .collect::<Vec<_>>();
-        let actively_fleeing = brain.fleeing && !nearby_threats.is_empty();
+        let own_power =
+            damage_per_second + health.current * 0.25 + evolution_power(&evolution.0) * 10.0;
+        let assessed_flee = nearby_threats.iter().any(|target| {
+            should_flee(
+                health.current / health.max.max(1.0),
+                tuning.flee_threshold,
+                own_power,
+                *target,
+            )
+        });
+        let actively_fleeing = (brain.fleeing || assessed_flee) && !nearby_threats.is_empty();
         let defensive_intruder = personal_space_intruder(bot_pos, &visible_combat, tuning);
-        let selected_target = current_target(&brain, &visible_combat, &shape_targets);
+        let selected_target = current_target(&brain, &visible_combat, &visible_shapes);
         let engagement_expired = brain.target_kind == EnemyBotTargetKind::Combatant
             && !actively_fleeing
             && defensive_intruder.is_none()
@@ -429,7 +572,7 @@ pub fn enemy_bot_ai_update(
             set_brain_target(&mut brain, None, EnemyBotTargetKind::Shape);
         }
 
-        let selected_target = current_target(&brain, &visible_combat, &shape_targets);
+        let selected_target = current_target(&brain, &visible_combat, &visible_shapes);
         if actively_fleeing {
             let target = most_dangerous_target(bot_pos, &nearby_threats, &brain);
             set_brain_target(&mut brain, target, EnemyBotTargetKind::Combatant);
@@ -440,7 +583,7 @@ pub fn enemy_bot_ai_update(
             {
                 let shape = select_farm_target(
                     bot_pos,
-                    &shape_targets,
+                    &visible_shapes,
                     &visible_combat,
                     damage_per_second,
                     movement_speed,
@@ -448,6 +591,10 @@ pub fn enemy_bot_ai_update(
                 );
                 set_brain_target(&mut brain, shape, EnemyBotTargetKind::Shape);
             }
+        } else if let Some(challenge) = challenge_target {
+            brain.truce_timer = 0.0;
+            brain.engagement_timer = brain.engagement_timer.max(0.5);
+            set_brain_target(&mut brain, Some(challenge), EnemyBotTargetKind::Combatant);
         } else if let Some(intruder) = defensive_intruder {
             brain.engagement_timer = 0.0;
             set_brain_target(&mut brain, Some(intruder), EnemyBotTargetKind::Combatant);
@@ -458,7 +605,7 @@ pub fn enemy_bot_ai_update(
             {
                 let shape = select_farm_target(
                     bot_pos,
-                    &shape_targets,
+                    &visible_shapes,
                     &visible_combat,
                     damage_per_second,
                     movement_speed,
@@ -469,7 +616,7 @@ pub fn enemy_bot_ai_update(
         } else if brain.decision_timer <= 0.0 || selected_target.is_none() {
             let shape = select_farm_target(
                 bot_pos,
-                &shape_targets,
+                &visible_shapes,
                 &visible_combat,
                 damage_per_second,
                 movement_speed,
@@ -498,12 +645,12 @@ pub fn enemy_bot_ai_update(
             }
         }
         if brain.decision_timer <= 0.0 {
-            brain.decision_timer =
-                tuning.decision_min + random_unit(&mut rng) * tuning.decision_variance;
+            brain.decision_timer = STRATEGIC_DECISION_INTERVAL;
         }
 
-        let target = current_target(&brain, &visible_combat, &shape_targets);
-        let dodge = projectile_avoidance(bot_entity, bot_pos, &projectiles);
+        let target = current_target(&brain, &visible_combat, &visible_shapes);
+        let dodge = projectile_avoidance(bot_entity, bot_pos, &nearby_entries, &projectiles);
+        let half = constants::arena_half_extent() - crate::tank::radius(&evolution.0);
         let boundary = boundary_avoidance(bot_pos, half);
         let social = social_avoidance(bot_pos, &visible_combat);
         let desired_velocity = if actively_fleeing {
@@ -556,32 +703,54 @@ pub fn enemy_bot_ai_update(
             let aim_error = angle_delta(brain.aim_angle, desired_angle).abs();
             brain.aim_angle =
                 rotate_towards(brain.aim_angle, desired_angle, tuning.turn_speed * dt);
-            update_enemy_bot_turrets(children, brain.aim_angle, evolution, &mut turrets);
 
             if target_distance <= tuning.view_range
                 && aim_error <= tuning.aim_tolerance
                 && shoot_cooldown.0 <= 0.0
             {
-                shoot_cooldown.0 = upgrades.0.reload_cooldown() * evolution.0.reload_multiplier();
+                let adjustments = bot_context.get_mut(bot_entity).map_or_else(
+                    |_| ShotAdjustments::default(),
+                    |(_, _, mut runtime)| runtime.shot_adjustments(evolution.0.passive()),
+                );
+                shoot_cooldown.0 = upgrades.0.reload_cooldown()
+                    * evolution.0.reload_multiplier()
+                    * adjustments.cooldown_multiplier;
+                protection.cancel();
+                let palette_index = bot_context
+                    .get(bot_entity)
+                    .map_or(0, |(palette, _, _)| palette.0);
                 shoot_enemy_bot_projectiles(
                     &mut commands,
-                    assets,
+                    &projectile_assets,
                     bot_entity,
                     transform.translation,
                     brain.aim_angle,
                     upgrades,
                     evolution,
+                    palette_materials.bot(palette_index).projectile.clone(),
+                    adjustments,
                     &mut rng,
                 );
+                if evolution.0.passive() == crate::evolution::PassiveKind::BoosterRecoil {
+                    let forward = Vec2::from_angle(brain.aim_angle);
+                    move_velocity.0 += forward * upgrades.0.movement_speed() * 0.08;
+                    move_velocity.0 = move_velocity.0.clamp_length_max(movement_speed * 1.25);
+                }
             }
         } else {
             brain.aim_angle = normalize_angle(brain.aim_angle + TURRET_IDLE_SPIN_SPEED * dt);
-            update_enemy_bot_turrets(children, brain.aim_angle, evolution, &mut turrets);
         }
 
         transform.translation += (move_velocity.0 + knockback_velocity.0).extend(0.0) * dt;
         transform.translation.x = transform.translation.x.clamp(-half, half);
         transform.translation.y = transform.translation.y.clamp(-half, half);
+        update_enemy_bot_turrets(
+            bot_entity,
+            &transform,
+            brain.aim_angle,
+            evolution,
+            &mut turrets,
+        );
         knockback_velocity.0 *= damping;
     }
 }
@@ -649,16 +818,43 @@ fn begin_truce(brain: &mut EnemyBotBrain, tuning: PlaystyleTuning, rng: &mut Rng
 }
 
 fn bot_damage_per_second(upgrades: &EnemyBotUpgrades, evolution: &EnemyBotEvolution) -> f32 {
-    let base_damage = upgrades.0.bullet_damage() as f32 * evolution.0.bullet_damage_multiplier();
+    tank_damage_per_second(&upgrades.0, &evolution.0)
+}
+
+fn tank_damage_per_second(
+    upgrades: &crate::hud::UpgradeState,
+    evolution: &crate::evolution::EvolutionState,
+) -> f32 {
+    let base_damage = upgrades.bullet_damage() * evolution.bullet_damage_multiplier();
     let volley_damage = evolution
-        .0
         .barrel_specs()
         .iter()
         .map(|spec| base_damage * spec.damage_multiplier)
         .sum::<f32>()
         .max(1.0);
-    let cooldown = upgrades.0.reload_cooldown() * evolution.0.reload_multiplier();
+    let cooldown = upgrades.reload_cooldown() * evolution.reload_multiplier();
     volley_damage / cooldown.max(0.05)
+}
+
+fn evolution_power(evolution: &crate::evolution::EvolutionState) -> f32 {
+    if evolution.current_kind == crate::evolution::EvolutionKind::Tank {
+        1.0
+    } else {
+        1.35
+    }
+}
+
+fn combat_power(target: TargetSnapshot) -> f32 {
+    target.dps + target.effective_health * 0.25 + target.evolution_power * 10.0
+}
+
+fn should_flee(
+    health_fraction: f32,
+    threshold: f32,
+    own_power: f32,
+    attacker: TargetSnapshot,
+) -> bool {
+    health_fraction <= threshold || combat_power(attacker) > own_power * 1.25
 }
 
 fn select_farm_target(
@@ -740,6 +936,7 @@ fn select_worthwhile_combat_target(
             let variation = 0.90 + random_unit(rng) * 0.20;
             let value = target.reward as f32 / (travel_time + destroy_time).max(0.4)
                 * retaliation_bonus
+                * if target.is_leader { 1.25 } else { 1.0 }
                 * variation
                 / (1.0 + level_risk + health_risk);
             (target, value)
@@ -778,13 +975,18 @@ fn most_dangerous_target(
 fn threat_score(bot_pos: Vec2, target: TargetSnapshot, brain: &EnemyBotBrain) -> f32 {
     let distance = bot_pos.distance(target.position);
     let proximity = (1.0 - distance / 900.0).clamp(0.0, 1.0);
-    let power = 0.8 + (target.level as f32 * 0.07).min(1.2);
+    let power = combat_power(target) / 25.0;
+    let bounty = target.reward as f32 / 300.0;
+    let vulnerability = 1.0 - target.health_fraction;
+    let recently_hurt = (target.recent_damage / target.effective_health.max(1.0)).min(1.0);
     let retaliation = if brain.last_attacker == Some(target.entity) {
         1.6
     } else {
         0.0
     };
-    proximity * proximity * power + retaliation
+    proximity * proximity * power + retaliation + bounty * 0.25
+        - vulnerability * 0.15
+        - recently_hurt * 0.1
 }
 
 fn defensive_velocity(
@@ -874,13 +1076,20 @@ fn flee_velocity(
 fn projectile_avoidance(
     bot_entity: Entity,
     bot_pos: Vec2,
+    nearby: &[crate::spatial::SpatialEntry],
     projectiles: &Query<
-        (&Transform, &Velocity, &ProjectileOwner),
+        (Entity, &Transform, &Velocity, &ProjectileOwner),
         (With<Projectile>, Without<EnemyBot>, Without<EnemyBotTurret>),
     >,
 ) -> Vec2 {
     let mut avoidance = Vec2::ZERO;
-    for (transform, velocity, owner) in projectiles.iter() {
+    for (entity, transform, velocity, owner) in projectiles.iter() {
+        if !nearby
+            .iter()
+            .any(|entry| entry.entity == entity && entry.kind == SpatialKind::Projectile)
+        {
+            continue;
+        }
         if matches!(*owner, ProjectileOwner::EnemyBot(owner) if owner == bot_entity) {
             continue;
         }
@@ -939,31 +1148,37 @@ fn regenerate_enemy_bot_health(
     }
 
     heal_progress.0 += regen_per_second * dt;
-    let heal_amount = heal_progress.0.floor() as u32;
-    if heal_amount == 0 {
+    let heal_amount = heal_progress.0.floor();
+    if heal_amount <= 0.0 {
         return;
     }
     health.current = (health.current + heal_amount).min(health.max);
-    heal_progress.0 -= heal_amount as f32;
+    heal_progress.0 -= heal_amount;
 }
 
 fn update_enemy_bot_turrets(
-    children: &Children,
+    owner: Entity,
+    owner_transform: &Transform,
     aim_angle: f32,
     evolution: &EnemyBotEvolution,
     turrets: &mut Query<(&mut Transform, &mut Visibility, &EnemyBotTurret), Without<EnemyBot>>,
 ) {
     let specs = evolution.0.barrel_specs();
-    for child in children.iter() {
-        let Ok((mut transform, mut visibility, turret)) = turrets.get_mut(child) else {
+    for (mut transform, mut visibility, turret) in turrets.iter_mut() {
+        if turret.owner != owner {
             continue;
-        };
+        }
         let Some(spec) = specs.get(turret.slot).copied() else {
             *visibility = Visibility::Hidden;
             continue;
         };
         *visibility = Visibility::Visible;
-        *transform = enemy_bot_barrel_transform(spec, turret.outline, aim_angle);
+        *transform = owner_transform.mul_transform(enemy_bot_barrel_transform(
+            spec,
+            turret.outline,
+            aim_angle,
+            &evolution.0,
+        ));
     }
 }
 
@@ -976,38 +1191,55 @@ fn shoot_enemy_bot_projectiles(
     aim_angle: f32,
     upgrades: &EnemyBotUpgrades,
     evolution: &EnemyBotEvolution,
+    projectile_material: Handle<ColorMaterial>,
+    adjustments: ShotAdjustments,
     rng: &mut Rng,
 ) {
-    let spread = evolution.0.spread_radians();
-    let base_damage = upgrades.0.bullet_damage() as f32 * evolution.0.bullet_damage_multiplier();
-    let bullet_speed = upgrades.0.bullet_speed() * evolution.0.bullet_speed_multiplier();
+    let spread = evolution.0.spread_radians() * adjustments.spread_multiplier;
+    let base_damage = upgrades.0.bullet_damage() * evolution.0.bullet_damage_multiplier();
+    let bullet_speed = upgrades.0.bullet_speed()
+        * evolution.0.bullet_speed_multiplier()
+        * adjustments.speed_multiplier;
     let lifetime = constants::PROJECTILE_LIFETIME * evolution.0.projectile_lifetime_multiplier();
     let knockback = evolution.0.bullet_knockback_multiplier();
 
-    for spec in evolution.0.barrel_specs() {
+    for (index, spec) in evolution.0.barrel_specs().iter().enumerate() {
+        if adjustments.bank.is_some_and(|bank| index / 2 != bank) {
+            continue;
+        }
         let jitter = if spread > 0.0 {
             (random_unit(rng) * 2.0 - 1.0) * spread
         } else {
             0.0
         };
-        let shot_angle = aim_angle + spec.angle_offset + jitter;
+        let shot_angle = aim_angle + spec.angle_offset + adjustments.angle_offset + jitter;
         let direction = Vec2::from_angle(shot_angle);
         let right = Vec2::new(direction.y, -direction.x);
         let spawn_pos = bot_translation
-            + (direction * player::muzzle_projectile_distance(spec.length)
+            + (direction * player::muzzle_projectile_distance(spec.length, &evolution.0)
                 + right * spec.lateral_offset)
                 .extend(1.0);
-        let damage = (base_damage * spec.damage_multiplier).round().max(1.0) as u32;
+        let damage = (base_damage * spec.damage_multiplier).max(0.1);
 
         commands.spawn((
             Projectile,
             ProjectileOwner::EnemyBot(bot_entity),
             Lifetime(lifetime),
             ProjectileDamage(damage),
-            ProjectilePenetration(upgrades.0.bullet_penetration()),
+            ProjectilePenetration(
+                upgrades
+                    .0
+                    .bullet_penetration()
+                    .saturating_add(evolution.0.penetration_bonus()),
+            ),
             ProjectileKnockback(knockback),
+            ProjectileEvolution(evolution.0.current_kind),
+            ProjectileTravel::default(),
+            ProjectileRear(spec.angle_offset.cos() < 0.0),
+            ProjectileSplashReady(evolution.0.passive() == crate::evolution::PassiveKind::Splash),
+            ProjectileHitHistory::default(),
             Mesh2d(assets.mesh.clone()),
-            MeshMaterial2d(assets.material.clone()),
+            MeshMaterial2d(projectile_material.clone()),
             Transform::from_translation(spawn_pos),
             Velocity(direction * bullet_speed),
         ));
@@ -1066,7 +1298,12 @@ mod tests {
             health_fraction: 1.0,
             current_health: 50.0,
             level: 1,
-            reward: TANK_KILL_XP,
+            reward: 100,
+            dps: 7.0,
+            effective_health: 50.0,
+            evolution_power: 1.0,
+            recent_damage: 0.0,
+            is_leader: false,
         };
         let shape = TargetSnapshot {
             entity: Entity::from_raw_u32(2).unwrap(),
@@ -1077,6 +1314,11 @@ mod tests {
             current_health: 4.0,
             level: 0,
             reward: 20,
+            dps: 0.0,
+            effective_health: 4.0,
+            evolution_power: 0.0,
+            recent_damage: 0.0,
+            is_leader: false,
         };
         let mut rng = Rng::new(7);
 
@@ -1094,5 +1336,41 @@ mod tests {
             )
             .is_none()
         );
+    }
+
+    #[test]
+    fn incoming_damage_interrupts_truce_for_retaliation_window() {
+        let mut brain = EnemyBotBrain {
+            truce_timer: 8.0,
+            ..default()
+        };
+        let attacker = Entity::from_bits(42);
+        brain.note_attacker(attacker);
+        assert_eq!(brain.last_attacker, Some(attacker));
+        assert_eq!(brain.truce_timer, 0.0);
+        assert_eq!(brain.retaliation_timer, 2.5);
+    }
+
+    #[test]
+    fn flee_assessment_reacts_to_low_health_or_superior_power() {
+        let attacker = TargetSnapshot {
+            entity: Entity::from_bits(99),
+            kind: EnemyBotTargetKind::Combatant,
+            position: Vec2::ZERO,
+            velocity: Vec2::ZERO,
+            health_fraction: 1.0,
+            current_health: 100.0,
+            level: 5,
+            reward: 200,
+            dps: 20.0,
+            effective_health: 100.0,
+            evolution_power: 1.35,
+            recent_damage: 0.0,
+            is_leader: false,
+        };
+        assert!(should_flee(0.2, 0.3, 100.0, attacker));
+        assert!(should_flee(1.0, 0.3, 20.0, attacker));
+        assert!(!should_flee(1.0, 0.3, 100.0, attacker));
+        assert_eq!(STRATEGIC_DECISION_INTERVAL, 1.0 / 8.0);
     }
 }

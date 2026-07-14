@@ -3,17 +3,15 @@ use crate::{
         EnemyBot, EnemyBotEvolution, EnemyBotHealth, EnemyBotLevel, EnemyBotPlaystyle,
         EnemyBotUpgrades, EnemyBotXp, award_enemy_bot_xp,
     },
-    player::Player,
+    player::{Player, PlayerHealth},
     rng::Rng,
     shape::{TotalXp, Xp},
 };
 use bevy::prelude::*;
 
-pub const TANK_KILL_XP: u32 = 100;
-
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CombatStats {
-    pub score: u32,
+    pub life_score: u32,
     pub kills: u32,
     pub deaths: u32,
 }
@@ -41,7 +39,7 @@ impl CombatDeathQueue {
 
 pub fn resolve_combat_deaths(
     mut queue: ResMut<CombatDeathQueue>,
-    mut player_stats: Query<&mut CombatStats, (With<Player>, Without<EnemyBot>)>,
+    mut player_stats: Query<(&mut CombatStats, &PlayerHealth), (With<Player>, Without<EnemyBot>)>,
     mut bots: Query<
         (
             &mut CombatStats,
@@ -60,9 +58,15 @@ pub fn resolve_combat_deaths(
 ) {
     let deaths = std::mem::take(&mut queue.0);
     for death in deaths {
+        let victim_score = match death.victim {
+            CombatantId::Player => player_stats
+                .single()
+                .map_or(0, |(stats, _)| stats.life_score),
+            CombatantId::EnemyBot(entity) => bots.get(entity).map_or(0, |bot| bot.0.life_score),
+        };
         match death.victim {
             CombatantId::Player => {
-                if let Ok(mut stats) = player_stats.single_mut() {
+                if let Ok((mut stats, _)) = player_stats.single_mut() {
                     stats.deaths += 1;
                 }
             }
@@ -76,14 +80,18 @@ pub fn resolve_combat_deaths(
         let Some(killer) = death.killer.filter(|killer| *killer != death.victim) else {
             continue;
         };
+        let reward = kill_xp(victim_score);
         match killer {
             CombatantId::Player => {
-                if let Ok(mut stats) = player_stats.single_mut() {
+                let Ok((mut stats, health)) = player_stats.single_mut() else {
+                    continue;
+                };
+                if health.current > 0.0 {
                     stats.kills += 1;
-                    stats.score += TANK_KILL_XP;
+                    stats.life_score = stats.life_score.saturating_add(reward);
+                    xp.0 = xp.0.saturating_add(reward);
+                    total_xp.0 = total_xp.0.saturating_add(reward);
                 }
-                xp.0 += TANK_KILL_XP;
-                total_xp.0 += TANK_KILL_XP;
             }
             CombatantId::EnemyBot(entity) => {
                 if let Ok((
@@ -98,7 +106,7 @@ pub fn resolve_combat_deaths(
                 {
                     stats.kills += 1;
                     award_enemy_bot_xp(
-                        TANK_KILL_XP,
+                        reward,
                         &mut bot_xp,
                         &mut bot_level,
                         &mut bot_upgrades,
@@ -111,5 +119,41 @@ pub fn resolve_combat_deaths(
                 }
             }
         }
+    }
+}
+
+pub fn kill_xp(victim_life_score: u32) -> u32 {
+    100u32.saturating_add(victim_life_score / 5).min(300)
+}
+
+pub fn reset_life_stats(stats: &mut CombatStats) {
+    stats.life_score = 0;
+}
+
+pub fn reset_match_stats(stats: &mut CombatStats) {
+    *stats = CombatStats::default();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bounty_scales_and_caps() {
+        assert_eq!(kill_xp(0), 100);
+        assert_eq!(kill_xp(500), 200);
+        assert_eq!(kill_xp(10_000), 300);
+    }
+
+    #[test]
+    fn life_reset_preserves_match_kd() {
+        let mut stats = CombatStats {
+            life_score: 900,
+            kills: 4,
+            deaths: 2,
+        };
+        reset_life_stats(&mut stats);
+        assert_eq!((stats.life_score, stats.kills, stats.deaths), (0, 4, 2));
+        reset_match_stats(&mut stats);
+        assert_eq!((stats.life_score, stats.kills, stats.deaths), (0, 0, 0));
     }
 }

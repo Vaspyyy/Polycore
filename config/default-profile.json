@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "identity": { "player_name": "" },
+  "records": {},
+  "achievements": [],
+  "unlocked_palettes": ["CoreBlue"],
+  "selected_palette": "CoreBlue",
+  "settings": {
+    "screen_shake": 0.35,
+    "damage_indicators": true,
+    "fullscreen": false
+  }
+}

@@ -4098,6 +4098,8 @@ name = "polycore"
 version = "0.1.0"
 dependencies = [
  "bevy",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

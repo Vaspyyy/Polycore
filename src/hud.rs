@@ -83,7 +83,9 @@ impl Default for UpgradeState {
 
 impl UpgradeState {
     pub fn add_points(&mut self, amount: u32) {
-        self.points += amount;
+        if !self.is_capped() {
+            self.points = self.points.saturating_add(amount);
+        }
     }
 
     pub fn reset(&mut self) {
@@ -109,6 +111,10 @@ impl UpgradeState {
 
     pub fn level_of(&self, kind: UpgradeKind) -> u32 {
         self.levels[kind.index()]
+    }
+
+    pub fn is_capped(&self) -> bool {
+        self.levels.iter().all(|level| *level >= UPGRADE_MAX_LEVEL)
     }
 
     pub fn spend_random_point(&mut self, rng: &mut Rng) -> bool {
@@ -167,12 +173,12 @@ impl UpgradeState {
         self.levels[HEALTH_REGEN_INDEX] as f32 * 1.25
     }
 
-    pub fn max_health(&self) -> u32 {
-        constants::PLAYER_MAX_HEALTH + self.levels[MAX_HEALTH_INDEX] * 20
+    pub fn max_health(&self) -> f32 {
+        constants::PLAYER_MAX_HEALTH + self.levels[MAX_HEALTH_INDEX] as f32 * 20.0
     }
 
-    pub fn body_damage(&self) -> u32 {
-        self.levels[BODY_DAMAGE_INDEX]
+    pub fn body_damage(&self) -> f32 {
+        self.levels[BODY_DAMAGE_INDEX] as f32
     }
 
     pub fn bullet_speed(&self) -> f32 {
@@ -183,8 +189,8 @@ impl UpgradeState {
         1 + self.levels[BULLET_PENETRATION_INDEX]
     }
 
-    pub fn bullet_damage(&self) -> u32 {
-        1 + self.levels[BULLET_DAMAGE_INDEX]
+    pub fn bullet_damage(&self) -> f32 {
+        constants::BASE_PROJECTILE_DAMAGE + self.levels[BULLET_DAMAGE_INDEX] as f32
     }
 
     pub fn reload_cooldown(&self) -> f32 {
@@ -521,7 +527,8 @@ pub fn update_hud(
         return;
     }
 
-    let xp_percent = (xp.0 as f32 / constants::XP_PER_LEVEL as f32 * 100.0).clamp(0.0, 100.0);
+    let required_xp = constants::xp_required_for_level(level.0);
+    let xp_percent = (xp.0 as f32 / required_xp as f32 * 100.0).clamp(0.0, 100.0);
 
     for (mut text, score_marker, level_marker, xp_marker) in text_query.iter_mut() {
         if score_marker.is_some() {
@@ -529,7 +536,7 @@ pub fn update_hud(
         } else if level_marker.is_some() {
             **text = format!("Lvl {}", level.0);
         } else if xp_marker.is_some() {
-            **text = format!("XP {} / {}", xp.0, constants::XP_PER_LEVEL);
+            **text = format!("XP {} / {}", xp.0, required_xp);
         }
     }
     for mut node in xp_fill.iter_mut() {
@@ -676,12 +683,23 @@ mod tests {
         upgrades.levels[MOVEMENT_SPEED_INDEX] = 2;
 
         assert_eq!(upgrades.health_regen_per_second(), 2.5);
-        assert_eq!(upgrades.max_health(), constants::PLAYER_MAX_HEALTH + 60);
-        assert_eq!(upgrades.body_damage(), 4);
+        assert_eq!(upgrades.max_health(), constants::PLAYER_MAX_HEALTH + 60.0);
+        assert_eq!(upgrades.body_damage(), 4.0);
         assert!(upgrades.bullet_speed() > constants::PROJECTILE_SPEED);
         assert_eq!(upgrades.bullet_penetration(), 7);
-        assert_eq!(upgrades.bullet_damage(), 8);
+        assert_eq!(upgrades.bullet_damage(), 10.0);
         assert!(upgrades.reload_cooldown() < constants::SHOOT_COOLDOWN);
         assert!(upgrades.movement_speed() > constants::PLAYER_SPEED);
+    }
+
+    #[test]
+    fn capped_build_does_not_bank_more_points() {
+        let mut upgrades = UpgradeState {
+            points: 0,
+            levels: [UPGRADE_MAX_LEVEL; UPGRADE_COUNT],
+        };
+        upgrades.add_points(20);
+        assert!(upgrades.is_capped());
+        assert_eq!(upgrades.points, 0);
     }
 }

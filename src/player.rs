@@ -4,6 +4,7 @@ use crate::{
     evolution::{self, BarrelSpec, EvolutionState},
     hud::UpgradeState,
     projectile::ShootCooldown,
+    tank::{RecentDamage, SpawnProtection, TankOutline},
 };
 use bevy::prelude::*;
 
@@ -12,14 +13,18 @@ pub struct Player;
 
 #[derive(Component)]
 pub struct Barrel {
+    pub owner: Entity,
     pub slot: usize,
     pub outline: bool,
 }
 
 #[derive(Component)]
+pub struct PlayerNameLabel;
+
+#[derive(Component)]
 pub struct PlayerHealth {
-    pub current: u32,
-    pub max: u32,
+    pub current: f32,
+    pub max: f32,
 }
 
 #[derive(Component)]
@@ -73,12 +78,12 @@ pub fn tank_icon_parts() -> Vec<TankIconPart> {
     ]
 }
 
-fn barrel_center_distance(length: f32) -> f32 {
-    constants::PLAYER_RADIUS - BARREL_OVERLAP + length / 2.0
+fn barrel_center_distance(length: f32, radius: f32) -> f32 {
+    radius - BARREL_OVERLAP + length / 2.0
 }
 
-pub fn muzzle_projectile_distance(length: f32) -> f32 {
-    constants::PLAYER_RADIUS - BARREL_OVERLAP + length + constants::PROJECTILE_RADIUS
+pub fn muzzle_projectile_distance(length: f32, evolution: &EvolutionState) -> f32 {
+    crate::tank::radius(evolution) - BARREL_OVERLAP + length + constants::PROJECTILE_RADIUS
 }
 
 pub fn barrel_local_axes(angle_offset: f32) -> (Vec2, Vec2) {
@@ -88,9 +93,10 @@ pub fn barrel_local_axes(angle_offset: f32) -> (Vec2, Vec2) {
     )
 }
 
-fn barrel_transform(spec: BarrelSpec, outline: bool) -> Transform {
+fn barrel_transform(spec: BarrelSpec, outline: bool, evolution: &EvolutionState) -> Transform {
     let (forward, right) = barrel_local_axes(spec.angle_offset);
-    let center = forward * barrel_center_distance(spec.length) + right * spec.lateral_offset;
+    let center = forward * barrel_center_distance(spec.length, crate::tank::radius(evolution))
+        + right * spec.lateral_offset;
     let outline_growth = if outline {
         constants::OUTLINE_THICKNESS * 2.0
     } else {
@@ -98,7 +104,7 @@ fn barrel_transform(spec: BarrelSpec, outline: bool) -> Transform {
     };
 
     Transform {
-        translation: Vec3::new(center.x, center.y, if outline { -0.2 } else { -0.1 }),
+        translation: Vec3::new(center.x, center.y, if outline { 0.1 } else { 0.2 }),
         rotation: Quat::from_rotation_z(spec.angle_offset),
         scale: Vec3::new(
             spec.width + outline_growth,
@@ -112,21 +118,18 @@ pub fn setup_player(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    palette_materials: Res<crate::palette::PaletteMaterials>,
+    profile: Res<crate::profile::Profile>,
 ) {
+    let selected = palette_materials.player(profile.data.selected_palette);
     let outline_material = materials.add(Color::srgba(
         constants::OUTLINE_COLOR[0],
         constants::OUTLINE_COLOR[1],
         constants::OUTLINE_COLOR[2],
         constants::OUTLINE_COLOR[3],
     ));
-    let barrel_material = materials.add(Color::srgba(
-        constants::BARREL_COLOR[0],
-        constants::BARREL_COLOR[1],
-        constants::BARREL_COLOR[2],
-        constants::BARREL_COLOR[3],
-    ));
 
-    commands
+    let player_entity = commands
         .spawn((
             Player,
             PlayerHealth {
@@ -138,58 +141,71 @@ pub fn setup_player(
             MoveVelocity::default(),
             CombatStats::default(),
             ShootCooldown(0.0),
+            SpawnProtection::default(),
+            RecentDamage::default(),
+            crate::passive::PassiveRuntime::default(),
             Mesh2d(meshes.add(Circle::new(constants::PLAYER_RADIUS))),
-            MeshMaterial2d(materials.add(Color::srgba(
-                constants::PLAYER_COLOR[0],
-                constants::PLAYER_COLOR[1],
-                constants::PLAYER_COLOR[2],
-                constants::PLAYER_COLOR[3],
-            ))),
+            MeshMaterial2d(selected.body.clone()),
             Transform::from_xyz(0.0, 0.0, 0.0),
             Visibility::Hidden,
         ))
-        .with_children(|player| {
-            player.spawn((
-                Mesh2d(meshes.add(Circle::new(
-                    constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
-                ))),
-                MeshMaterial2d(outline_material.clone()),
-                Transform::from_xyz(0.0, 0.0, -0.2),
+        .id();
+
+    commands.entity(player_entity).with_children(|player| {
+        player.spawn((
+            TankOutline,
+            Mesh2d(meshes.add(Circle::new(
+                constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
+            ))),
+            MeshMaterial2d(outline_material.clone()),
+            Transform::from_xyz(0.0, 0.0, -0.2),
+        ));
+    });
+
+    let barrel_mesh = meshes.add(Rectangle::new(1.0, 1.0));
+    let default_evolution = EvolutionState::default();
+    let specs = default_evolution.barrel_specs();
+    let owner_transform = Transform::default();
+    for slot in 0..evolution::MAX_BARRELS {
+        let spec = specs.get(slot).copied().unwrap_or(specs[0]);
+        for (outline, material) in [
+            (true, outline_material.clone()),
+            (false, selected.barrel.clone()),
+        ] {
+            commands.spawn((
+                Barrel {
+                    owner: player_entity,
+                    slot,
+                    outline,
+                },
+                Mesh2d(barrel_mesh.clone()),
+                MeshMaterial2d(material),
+                owner_transform.mul_transform(barrel_transform(spec, outline, &default_evolution)),
+                Visibility::Hidden,
             ));
-            let barrel_mesh = meshes.add(Rectangle::new(1.0, 1.0));
-            let specs = EvolutionState::default().barrel_specs();
-            for slot in 0..evolution::MAX_BARRELS {
-                let spec = specs.get(slot).copied().unwrap_or(specs[0]);
-                player.spawn((
-                    Barrel {
-                        slot,
-                        outline: true,
-                    },
-                    Mesh2d(barrel_mesh.clone()),
-                    MeshMaterial2d(outline_material.clone()),
-                    barrel_transform(spec, true),
-                    if slot == 0 {
-                        Visibility::Visible
-                    } else {
-                        Visibility::Hidden
-                    },
-                ));
-                player.spawn((
-                    Barrel {
-                        slot,
-                        outline: false,
-                    },
-                    Mesh2d(barrel_mesh.clone()),
-                    MeshMaterial2d(barrel_material.clone()),
-                    barrel_transform(spec, false),
-                    if slot == 0 {
-                        Visibility::Visible
-                    } else {
-                        Visibility::Hidden
-                    },
-                ));
-            }
-        });
+        }
+    }
+
+    let display_name = if profile.data.identity.player_name.trim().is_empty() {
+        "Player"
+    } else {
+        profile.data.identity.player_name.as_str()
+    };
+    commands.spawn((
+        PlayerNameLabel,
+        Text2d::new(display_name),
+        TextFont {
+            font_size: FontSize::Px(15.0),
+            ..default()
+        },
+        TextColor(Color::WHITE),
+        TextShadow {
+            offset: Vec2::new(1.5, 1.5),
+            color: Color::BLACK,
+        },
+        Transform::from_xyz(0.0, constants::PLAYER_RADIUS + 18.0, 4.0),
+        Visibility::Hidden,
+    ));
 
     commands.spawn((
         HealthBarBack,
@@ -224,6 +240,29 @@ pub fn setup_player(
     ));
 }
 
+pub fn sync_player_palette(
+    profile: Res<crate::profile::Profile>,
+    palettes: Res<crate::palette::PaletteMaterials>,
+    mut player: Query<&mut MeshMaterial2d<ColorMaterial>, (With<Player>, Without<Barrel>)>,
+    mut barrels: Query<
+        (&Barrel, &mut MeshMaterial2d<ColorMaterial>),
+        (Without<Player>, Without<crate::tank::TankOutline>),
+    >,
+) {
+    if !profile.is_changed() {
+        return;
+    }
+    let selected = palettes.player(profile.data.selected_palette);
+    if let Ok(mut material) = player.single_mut() {
+        material.0 = selected.body.clone();
+    }
+    for (barrel, mut material) in &mut barrels {
+        if !barrel.outline {
+            material.0 = selected.barrel.clone();
+        }
+    }
+}
+
 pub fn player_movement(
     time: Res<Time>,
     keyboard: Res<ButtonInput<KeyCode>>,
@@ -235,11 +274,12 @@ pub fn player_movement(
             &mut Velocity,
             &mut MoveVelocity,
             &mut DamageCooldown,
+            &crate::passive::PassiveRuntime,
         ),
         With<Player>,
     >,
 ) {
-    let Ok((mut transform, mut velocity, mut move_velocity, mut damage_cooldown)) =
+    let Ok((mut transform, mut velocity, mut move_velocity, mut damage_cooldown, passive_runtime)) =
         query.single_mut()
     else {
         return;
@@ -261,7 +301,9 @@ pub fn player_movement(
 
     let direction = direction.normalize_or_zero();
     let dt = time.delta_secs();
-    let movement_speed = upgrades.movement_speed() * evolution.movement_multiplier();
+    let movement_speed = upgrades.movement_speed()
+        * evolution.movement_multiplier()
+        * crate::passive::movement_multiplier(passive_runtime, evolution.passive());
     let target_velocity = direction * movement_speed;
     let acceleration = movement_speed / constants::PLAYER_ACCEL_TIME;
     move_velocity.0 = approach_velocity(move_velocity.0, target_velocity, acceleration * dt);
@@ -271,7 +313,7 @@ pub fn player_movement(
     velocity.0 *= damping;
     damage_cooldown.0 = (damage_cooldown.0 - dt).max(0.0);
 
-    let half = constants::arena_half_extent() - constants::PLAYER_RADIUS;
+    let half = constants::arena_half_extent() - crate::tank::radius(&evolution);
     transform.translation.x = transform.translation.x.clamp(-half, half);
     transform.translation.y = transform.translation.y.clamp(-half, half);
 }
@@ -288,14 +330,14 @@ pub fn update_player_upgrade_stats(
     let Ok(mut health) = player.single_mut() else {
         return;
     };
-    let upgraded_max = (upgrades.max_health() as i32 + evolution.max_health_bonus()).max(40) as u32;
+    let upgraded_max = (upgrades.max_health() + evolution.max_health_bonus() as f32).max(40.0);
     if health.max == upgraded_max {
         return;
     }
 
-    let missing_health = health.max.saturating_sub(health.current);
+    let missing_health = (health.max - health.current).max(0.0);
     health.max = upgraded_max;
-    health.current = upgraded_max.saturating_sub(missing_health);
+    health.current = (upgraded_max - missing_health).max(0.0);
 }
 
 pub fn regenerate_player_health(
@@ -320,13 +362,13 @@ pub fn regenerate_player_health(
     }
 
     *heal_progress += regen_per_second * time.delta_secs();
-    let heal_amount = heal_progress.floor() as u32;
-    if heal_amount == 0 {
+    let heal_amount = heal_progress.floor();
+    if heal_amount <= 0.0 {
         return;
     }
 
     health.current = (health.current + heal_amount).min(health.max);
-    *heal_progress -= heal_amount as f32;
+    *heal_progress -= heal_amount;
 }
 
 fn approach_velocity(current: Vec2, target: Vec2, max_delta: f32) -> Vec2 {
@@ -363,21 +405,71 @@ pub fn player_aim(
 
 pub fn update_barrel(
     evolution: Res<EvolutionState>,
-    mut barrels: Query<(&Barrel, &mut Transform, &mut Visibility)>,
+    player: Query<&Transform, With<Player>>,
+    mut barrels: Query<(&Barrel, &mut Transform, &mut Visibility), Without<Player>>,
 ) {
+    let Ok(player_transform) = player.single() else {
+        return;
+    };
     let specs = evolution.barrel_specs();
     for (barrel, mut transform, mut visibility) in barrels.iter_mut() {
+        if player.get(barrel.owner).is_err() {
+            *visibility = Visibility::Hidden;
+            continue;
+        }
         let Some(spec) = specs.get(barrel.slot).copied() else {
             *visibility = Visibility::Hidden;
             continue;
         };
 
         *visibility = Visibility::Visible;
-        *transform = barrel_transform(spec, barrel.outline);
+        *transform =
+            player_transform.mul_transform(barrel_transform(spec, barrel.outline, &evolution));
+    }
+}
+
+pub fn sync_player_name_label(
+    phase: Res<crate::menu::GamePhase>,
+    player_name: Res<crate::menu::PlayerName>,
+    evolution: Res<EvolutionState>,
+    player: Query<(&Transform, &PlayerHealth), With<Player>>,
+    mut labels: Query<
+        (&mut Text2d, &mut Transform, &mut Visibility),
+        (With<PlayerNameLabel>, Without<Player>),
+    >,
+) {
+    let Ok((player_transform, health)) = player.single() else {
+        return;
+    };
+    let visible = matches!(
+        *phase,
+        crate::menu::GamePhase::Playing | crate::menu::GamePhase::Paused
+    ) && health.current > 0.0;
+    let display_name = if player_name.0.trim().is_empty() {
+        "Player"
+    } else {
+        player_name.0.as_str()
+    };
+    for (mut text, mut transform, mut visibility) in &mut labels {
+        if text.as_str() != display_name {
+            **text = display_name.to_string();
+        }
+        transform.translation = Vec3::new(
+            player_transform.translation.x,
+            player_transform.translation.y + crate::tank::radius(&evolution) + 18.0,
+            4.0,
+        );
+        transform.rotation = Quat::IDENTITY;
+        *visibility = if visible {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
     }
 }
 
 pub fn update_health_bar(
+    evolution: Res<EvolutionState>,
     player: Query<(&Transform, &PlayerHealth), With<Player>>,
     mut back: Query<
         (&mut Transform, &mut Visibility),
@@ -410,9 +502,9 @@ pub fn update_health_bar(
         Visibility::Hidden
     };
 
-    let health_fraction = (health.current as f32 / health.max as f32).clamp(0.0, 1.0);
-    let bar_position =
-        player_transform.translation + Vec3::new(0.0, constants::HEALTH_BAR_OFFSET_Y, 0.0);
+    let health_fraction = (health.current / health.max).clamp(0.0, 1.0);
+    let bar_position = player_transform.translation
+        + Vec3::new(0.0, crate::tank::health_bar_offset(&evolution), 0.0);
 
     back_transform.translation = Vec3::new(bar_position.x, bar_position.y, 2.0);
     back_transform.rotation = Quat::IDENTITY;
@@ -424,6 +516,22 @@ pub fn update_health_bar(
     );
     fill_transform.scale.x = health_fraction;
     fill_transform.rotation = Quat::IDENTITY;
+}
+
+pub fn hide_health_bars_when_not_playing(
+    phase: Res<crate::menu::GamePhase>,
+    mut bars: Query<&mut Visibility, Or<(With<HealthBarBack>, With<HealthBarFill>)>>,
+) {
+    if phase.is_changed()
+        && matches!(
+            *phase,
+            crate::menu::GamePhase::Menu | crate::menu::GamePhase::Dead
+        )
+    {
+        for mut visibility in &mut bars {
+            *visibility = Visibility::Hidden;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -448,6 +556,72 @@ mod tests {
         let barrel_length = EvolutionState::default().barrel_specs()[0].length;
         let barrel_tip_distance = constants::PLAYER_RADIUS - BARREL_OVERLAP + barrel_length;
 
-        assert!(muzzle_projectile_distance(barrel_length) > barrel_tip_distance);
+        assert!(
+            muzzle_projectile_distance(barrel_length, &EvolutionState::default())
+                > barrel_tip_distance
+        );
+    }
+
+    #[test]
+    fn barrel_world_transform_follows_player_owner() {
+        let evolution = EvolutionState::default();
+        let spec = evolution.barrel_specs()[0];
+        let owner = Transform::from_xyz(120.0, -45.0, 0.0)
+            .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
+        let local = barrel_transform(spec, false, &evolution);
+        let world = owner.mul_transform(local);
+
+        assert!(
+            world
+                .translation
+                .truncate()
+                .distance(owner.transform_point(local.translation).truncate())
+                < 0.001
+        );
+        assert!(
+            world
+                .translation
+                .truncate()
+                .distance(owner.translation.truncate())
+                > constants::PLAYER_RADIUS
+        );
+    }
+
+    #[test]
+    fn player_visual_system_queries_are_disjoint() {
+        let mut app = App::new();
+        app.insert_resource(EvolutionState::default())
+            .insert_resource(crate::menu::GamePhase::Playing)
+            .insert_resource(crate::menu::PlayerName("Tester".to_string()))
+            .add_systems(Update, (update_barrel, sync_player_name_label));
+
+        let player = app
+            .world_mut()
+            .spawn((
+                Player,
+                PlayerHealth {
+                    current: 50.0,
+                    max: 50.0,
+                },
+                Transform::default(),
+            ))
+            .id();
+        app.world_mut().spawn((
+            Barrel {
+                owner: player,
+                slot: 0,
+                outline: false,
+            },
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+        app.world_mut().spawn((
+            PlayerNameLabel,
+            Text2d::default(),
+            Transform::default(),
+            Visibility::Hidden,
+        ));
+
+        app.update();
     }
 }
