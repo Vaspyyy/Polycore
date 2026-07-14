@@ -1,0 +1,21 @@
+.github/workflows/release.yml
+  s_5f7fd94dd65a55::t_794dda37e7ee86 28-34
+.github/workflows/ci.yml
+  s_5f7fd94dd65a55::t_794dda37e7ee86 22-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "c3bad868faa957e7b6b22e12cc79329da38eead0",
+  "prompts": {},
+  "sessions": {
+    "s_5f7fd94dd65a55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f61d7-5b6d-74a1-a0ae-032896a90606",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
