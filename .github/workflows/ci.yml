@@ -2,21 +2,35 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
+
+permissions:
+  contents: read
 
 jobs:
   validate:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact: polycore-linux-x86_64
+            archive: polycore-linux-x86_64.tar.gz
+            binary: polycore
+          - os: windows-latest
+            artifact: polycore-windows-x86_64
+            archive: polycore-windows-x86_64.zip
+            binary: polycore.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
@@ -29,5 +43,30 @@ jobs:
       - run: cargo fmt -- --check
       - run: cargo test
       - run: cargo check
-      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo build --release
+      - name: Stage archive
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          mkdir -p "dist/${{ matrix.artifact }}"
+          cp "target/release/${{ matrix.binary }}" "dist/${{ matrix.artifact }}/"
+          cp -r config README.md LICENSE.md CREDITS.md "dist/${{ matrix.artifact }}/"
+      - name: Create archive
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        shell: bash
+        run: |
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a "dist/${{ matrix.archive }}" "./dist/${{ matrix.artifact }}/*"
+          else
+            tar -C dist -czf "dist/${{ matrix.archive }}" "${{ matrix.artifact }}"
+          fi
+      - name: Upload release candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
