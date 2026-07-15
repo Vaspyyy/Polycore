@@ -29,7 +29,9 @@ pub struct SpatialGrid {
 
 impl SpatialGrid {
     pub fn clear(&mut self) {
-        self.cells.clear();
+        for entries in self.cells.values_mut() {
+            entries.clear();
+        }
     }
     pub fn insert(&mut self, entry: SpatialEntry) {
         self.cells
@@ -87,15 +89,35 @@ impl SpatialGrid {
     pub fn unique_pairs(&self, radius: f32) -> Vec<(Entity, Entity)> {
         self.unique_pairs_matching(radius, None)
     }
+    #[cfg(test)]
     pub fn unique_pairs_of_kind(&self, radius: f32, kind: SpatialKind) -> Vec<(Entity, Entity)> {
         self.unique_pairs_matching(radius, Some(kind))
     }
+    pub fn unique_pairs_of_kind_into(
+        &self,
+        radius: f32,
+        kind: SpatialKind,
+        pairs: &mut Vec<(Entity, Entity)>,
+    ) {
+        self.unique_pairs_matching_into(radius, Some(kind), pairs);
+    }
+    #[cfg(test)]
     fn unique_pairs_matching(
         &self,
         radius: f32,
         kind: Option<SpatialKind>,
     ) -> Vec<(Entity, Entity)> {
         let mut pairs = Vec::new();
+        self.unique_pairs_matching_into(radius, kind, &mut pairs);
+        pairs
+    }
+    fn unique_pairs_matching_into(
+        &self,
+        radius: f32,
+        kind: Option<SpatialKind>,
+        pairs: &mut Vec<(Entity, Entity)>,
+    ) {
+        pairs.clear();
         let radius_sq = radius * radius;
         for entries in self.cells.values() {
             for entry in entries {
@@ -123,7 +145,6 @@ impl SpatialGrid {
             }
         }
         pairs.sort_by_key(|(a, b)| (a.to_bits(), b.to_bits()));
-        pairs
     }
 }
 
@@ -179,7 +200,13 @@ pub fn rebuild_spatial_grid(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
+
+    fn mutate_profile_during_stress(mut profile: ResMut<crate::profile::Profile>) {
+        profile.data.records.shapes_destroyed =
+            profile.data.records.shapes_destroyed.wrapping_add(1);
+        profile.mark_dirty();
+    }
     #[test]
     fn neighbor_queries_and_pairs_are_unique() {
         let mut grid = SpatialGrid::default();
@@ -228,6 +255,29 @@ mod tests {
             grid.unique_pairs_of_kind(100.0, SpatialKind::Shape)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn clear_and_queries_reuse_allocated_capacity() {
+        let mut grid = SpatialGrid::default();
+        let cell_position = Vec2::new(10.0, 10.0);
+        for index in 0..32 {
+            grid.insert(SpatialEntry {
+                entity: Entity::from_bits(index + 1),
+                position: cell_position,
+                kind: SpatialKind::Tank,
+            });
+        }
+        let cell_key = cell(cell_position);
+        let capacity = grid.cells[&cell_key].capacity();
+        grid.clear();
+        assert_eq!(grid.cells[&cell_key].capacity(), capacity);
+        assert!(grid.cells[&cell_key].is_empty());
+
+        let mut pairs = Vec::with_capacity(64);
+        let pair_capacity = pairs.capacity();
+        grid.unique_pairs_of_kind_into(100.0, SpatialKind::Tank, &mut pairs);
+        assert_eq!(pairs.capacity(), pair_capacity);
     }
 
     #[test]
@@ -283,10 +333,12 @@ mod tests {
             .collect::<Vec<_>>();
         let mut samples = Vec::with_capacity(MEASURED);
         let mut scratch = Vec::new();
+        let mut pair_scratch = Vec::new();
+        let mut grid = SpatialGrid::default();
 
         for step in 0..(WARMUP + MEASURED) {
             let started = Instant::now();
-            let mut grid = SpatialGrid::default();
+            grid.clear();
             for (index, position) in tanks.iter().enumerate() {
                 grid.insert(SpatialEntry {
                     entity: Entity::from_bits(index as u64 + 1),
@@ -344,10 +396,14 @@ mod tests {
                 );
                 std::hint::black_box(scratch.len());
             }
-            std::hint::black_box(grid.unique_pairs_of_kind(150.0, SpatialKind::Tank));
-            std::hint::black_box(
-                grid.unique_pairs_of_kind(constants::SHAPE_RADIUS * 2.0, SpatialKind::Shape),
+            grid.unique_pairs_of_kind_into(150.0, SpatialKind::Tank, &mut pair_scratch);
+            std::hint::black_box(pair_scratch.len());
+            grid.unique_pairs_of_kind_into(
+                constants::SHAPE_RADIUS * 2.0,
+                SpatialKind::Shape,
+                &mut pair_scratch,
             );
+            std::hint::black_box(pair_scratch.len());
             if step >= WARMUP {
                 samples.push(started.elapsed().as_secs_f64() * 1_000.0);
             }
@@ -363,5 +419,175 @@ mod tests {
         let target = Entity::from_bits(7_777);
         assert!(history.record(target));
         assert!(!history.record(target));
+    }
+
+    #[test]
+    #[ignore = "run with cargo test --release -- --ignored stress_harness"]
+    fn release_stress_harness_runs_fixed_schedule_and_cleanup() {
+        const WARMUP: usize = 60;
+        const MEASURED: usize = 360;
+        let root =
+            std::env::temp_dir().join(format!("polycore-fixed-stress-{}", std::process::id()));
+        let profile_path = root.join("profile.json");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let mut world = World::new();
+        let mut fixed_clock = Time::<()>::default();
+        fixed_clock.advance_by(Duration::from_micros(15_625));
+        world.insert_resource(fixed_clock);
+        world.insert_resource(SpatialGrid::default());
+        world.insert_resource(crate::menu::GamePhase::Playing);
+        world.insert_resource(crate::profile::Profile::test_with_path(Some(
+            profile_path.clone(),
+        )));
+        world.insert_resource(crate::projectile::ProjectileAssets {
+            mesh: Handle::default(),
+        });
+        world.insert_resource(crate::evolution::EvolutionState {
+            current_kind: crate::evolution::EvolutionKind::Sentry,
+            ..default()
+        });
+
+        world.spawn((
+            Player,
+            PlayerHealth {
+                current: 100.0,
+                max: 100.0,
+            },
+            crate::combat::LifeGeneration(1),
+            Transform::from_xyz(-200.0, 0.0, 0.0),
+        ));
+        let capstones = [
+            crate::evolution::EvolutionKind::Emplacement,
+            crate::evolution::EvolutionKind::Siegebreaker,
+            crate::evolution::EvolutionKind::Lancer,
+            crate::evolution::EvolutionKind::Fusillade,
+            crate::evolution::EvolutionKind::Guardian,
+        ];
+        for (index, capstone) in capstones.into_iter().enumerate() {
+            world.spawn((
+                EnemyBot,
+                EnemyBotHealth {
+                    current: 100.0,
+                    max: 100.0,
+                },
+                crate::combat::LifeGeneration(1),
+                crate::enemy_bot::EnemyBotEvolution(crate::evolution::EvolutionState {
+                    current_kind: capstone,
+                    ..default()
+                }),
+                Transform::from_xyz(index as f32 * 80.0 - 120.0, 140.0, 0.0),
+            ));
+        }
+        for index in 0..120 {
+            world.spawn((
+                Shape,
+                Health(100.0),
+                Transform::from_xyz(
+                    (index % 12) as f32 * 110.0 - 605.0,
+                    (index / 12) as f32 * 110.0 - 495.0,
+                    0.0,
+                ),
+            ));
+        }
+        for index in 0..1_000 {
+            world.spawn((
+                Projectile,
+                crate::projectile::Lifetime(30.0),
+                crate::projectile::ProjectileTravel::default(),
+                crate::projectile::ProjectileRadius(constants::PROJECTILE_RADIUS),
+                crate::player::Velocity(Vec2::new(
+                    22.0 + (index % 7) as f32,
+                    11.0 - (index % 5) as f32,
+                )),
+                crate::ability::ProjectileAbility {
+                    reflected: index % 3 == 0,
+                    ..default()
+                },
+                Transform::from_xyz(
+                    (index % 40) as f32 * 70.0 - 1_365.0,
+                    (index / 40) as f32 * 70.0 - 840.0,
+                    0.0,
+                ),
+            ));
+        }
+        for index in 0..4 {
+            let child = world
+                .spawn((crate::ability::ConstructHealthFill, Transform::default()))
+                .id();
+            let construct = world
+                .spawn((
+                    crate::ability::Construct {
+                        kind: crate::ability::ConstructKind::Fortification,
+                        owner: crate::projectile::ProjectileOwner::Player,
+                        generation: 1,
+                        health: 150.0,
+                        max_health: 150.0,
+                        remaining: 30.0,
+                        duration: 30.0,
+                        damage: 0.0,
+                        projectile_speed: 0.0,
+                        range: 0.0,
+                        fire_timer: 0.0,
+                    },
+                    Transform::from_xyz(index as f32 * 180.0 - 270.0, -220.0, 0.0),
+                ))
+                .id();
+            world.entity_mut(construct).add_child(child);
+        }
+
+        let mut fixed_schedule = Schedule::new(FixedUpdate);
+        fixed_schedule.add_systems(
+            (
+                crate::ability::update_constructs,
+                crate::projectile::projectile_update,
+                rebuild_spatial_grid,
+                mutate_profile_during_stress,
+                crate::profile::flush_profile,
+            )
+                .chain(),
+        );
+        let mut samples = Vec::with_capacity(MEASURED);
+        for step in 0..(WARMUP + MEASURED) {
+            let started = Instant::now();
+            fixed_schedule.run(&mut world);
+            if step >= WARMUP {
+                samples.push(started.elapsed().as_secs_f64() * 1_000.0);
+            }
+        }
+        samples.sort_by(f64::total_cmp);
+        let p95 = samples[((samples.len() - 1) as f32 * 0.95).round() as usize];
+        eprintln!("fixed-schedule stress p95={p95:.3}ms");
+        assert!(p95 < 15.625, "p95 {p95:.3}ms exceeded fixed-step budget");
+        assert!(
+            !profile_path.exists(),
+            "profile was written during active play"
+        );
+
+        let mut projectile_lifetimes =
+            world.query_filtered::<&mut crate::projectile::Lifetime, With<Projectile>>();
+        for mut lifetime in projectile_lifetimes.iter_mut(&mut world) {
+            lifetime.0 = 0.0;
+        }
+        let mut constructs = world.query::<&mut crate::ability::Construct>();
+        for mut construct in constructs.iter_mut(&mut world) {
+            construct.remaining = 0.0;
+        }
+        fixed_schedule.run(&mut world);
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<Projectile>>()
+                .iter(&world)
+                .count(),
+            0
+        );
+        assert_eq!(
+            world
+                .query_filtered::<Entity, With<crate::ability::Construct>>()
+                .iter(&world)
+                .count(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 }

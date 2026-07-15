@@ -791,6 +791,7 @@ fn random_challenge_delay(rng: &mut Rng) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn challenge_break_distance_has_outward_hysteresis() {
@@ -856,5 +857,32 @@ mod tests {
             let delay = random_challenge_delay(&mut rng);
             assert!((20.0..=30.0).contains(&delay));
         }
+    }
+
+    #[test]
+    fn exit_commits_crown_progress_before_final_profile_save() {
+        let root = std::env::temp_dir().join(format!("polycore-exit-crown-{}", std::process::id()));
+        let path = root.join("profile.json");
+        let _ = fs::remove_dir_all(&root);
+        let mut world = World::new();
+        world.insert_resource(Profile::test_with_path(Some(path.clone())));
+        world.insert_resource(DominanceState {
+            streak_secs: 8.0,
+            pending_player_crown_secs: 6.5,
+            ..default()
+        });
+        world.insert_resource(RunStats::default());
+        world.init_resource::<Messages<bevy::app::AppExit>>();
+        world.write_message(bevy::app::AppExit::Success);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(flush_crown_progress_on_exit);
+        schedule.run(&mut world);
+
+        let saved: crate::profile::ProfileData =
+            serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved.records.total_crown_time_secs, 6.5);
+        assert_eq!(saved.records.best_crown_streak_secs, 8.0);
+        assert!(!world.resource::<Profile>().is_dirty());
+        let _ = fs::remove_dir_all(root);
     }
 }

@@ -11,6 +11,7 @@ use crate::{
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
 const LEADERBOARD_ENTRY_COUNT: usize = BOT_COUNT + 1;
 const LEADERBOARD_WIDTH: f32 = 334.0;
@@ -114,15 +115,14 @@ struct LeaderboardEntry {
     is_player: bool,
     is_alive: bool,
     is_crowned: bool,
-    color_key: u8,
     body_color: [f32; 4],
     barrel_color: [f32; 4],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct LeaderboardSnapshot {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LeaderboardProbe {
     stable_id: u64,
-    name: String,
+    name_hash: u64,
     score: u32,
     kills: u32,
     deaths: u32,
@@ -131,6 +131,12 @@ pub(crate) struct LeaderboardSnapshot {
     is_alive: bool,
     is_crowned: bool,
     color_key: u8,
+}
+
+fn leaderboard_name_hash(name: &str) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    name.hash(&mut hasher);
+    hasher.finish()
 }
 
 pub fn setup_leaderboard(mut commands: Commands) {
@@ -413,8 +419,55 @@ pub fn update_leaderboard(
         With<EnemyBot>,
     >,
     mut ui: LeaderboardUi,
-    mut last_snapshot: Local<Vec<LeaderboardSnapshot>>,
+    mut current_probe: Local<Vec<LeaderboardProbe>>,
+    mut last_probe: Local<Vec<LeaderboardProbe>>,
 ) {
+    current_probe.clear();
+    if let Ok((entity, health, stats)) = player.single() {
+        let display_name = if player_name.0.is_empty() {
+            "Player"
+        } else {
+            &player_name.0
+        };
+        current_probe.push(LeaderboardProbe {
+            stable_id: entity.to_bits(),
+            name_hash: leaderboard_name_hash(display_name),
+            score: stats.life_score,
+            kills: stats.kills,
+            deaths: stats.deaths,
+            evolution: player_evolution.current_kind,
+            is_player: true,
+            is_alive: health.current > 0.0,
+            is_crowned: dominance.leader == Some(entity),
+            color_key: profile.data.selected_palette as u8,
+        });
+    }
+    current_probe.extend(bots.iter().map(
+        |(entity, name, health, stats, evolution, palette_id)| LeaderboardProbe {
+            stable_id: entity.to_bits(),
+            name_hash: leaderboard_name_hash(&name.0),
+            score: stats.life_score,
+            kills: stats.kills,
+            deaths: stats.deaths,
+            evolution: evolution.0.current_kind,
+            is_player: false,
+            is_alive: health.current > 0.0,
+            is_crowned: dominance.leader == Some(entity),
+            color_key: 32 + palette_id.0 as u8,
+        },
+    ));
+    current_probe.sort_by(|a, b| {
+        crate::dominance::compare_rank(
+            (a.score, a.kills, a.deaths, a.stable_id),
+            (b.score, b.kills, b.deaths, b.stable_id),
+        )
+    });
+    if *last_probe == *current_probe {
+        return;
+    }
+    last_probe.clear();
+    last_probe.extend(current_probe.iter().copied());
+
     let mut entries = Vec::with_capacity(LEADERBOARD_ENTRY_COUNT);
     if let Ok((entity, health, stats)) = player.single() {
         let palette_id = profile.data.selected_palette;
@@ -433,7 +486,6 @@ pub fn update_leaderboard(
             is_player: true,
             is_alive: health.current > 0.0,
             is_crowned: dominance.leader == Some(entity),
-            color_key: palette_id as u8,
             body_color: palette.body,
             barrel_color: palette.barrel,
         });
@@ -452,7 +504,6 @@ pub fn update_leaderboard(
                     is_player: false,
                     is_alive: health.current > 0.0,
                     is_crowned: dominance.leader == Some(entity),
-                    color_key: 32 + palette_id.0 as u8,
                     body_color: palette.body,
                     barrel_color: palette.barrel,
                 }
@@ -464,25 +515,6 @@ pub fn update_leaderboard(
             (b.score, b.kills, b.deaths, b.stable_id),
         )
     });
-    let snapshot = entries
-        .iter()
-        .map(|entry| LeaderboardSnapshot {
-            stable_id: entry.stable_id,
-            name: entry.name.clone(),
-            score: entry.score,
-            kills: entry.kills,
-            deaths: entry.deaths,
-            evolution: entry.evolution.current_kind,
-            is_player: entry.is_player,
-            is_alive: entry.is_alive,
-            is_crowned: entry.is_crowned,
-            color_key: entry.color_key,
-        })
-        .collect::<Vec<_>>();
-    if *last_snapshot == snapshot {
-        return;
-    }
-    *last_snapshot = snapshot;
 
     for (row, mut background) in ui.rows.iter_mut() {
         let Some(entry) = entries.get(row.0) else {

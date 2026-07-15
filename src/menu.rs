@@ -7,7 +7,7 @@ use bevy::{
 const MODE_HIGHLIGHT_WIDTH: f32 = 154.0;
 const MODE_HIGHLIGHT_SINGLE_X: f32 = 10.0;
 
-#[derive(Resource, PartialEq, Eq, Clone, Copy)]
+#[derive(Resource, Debug, PartialEq, Eq, Clone, Copy)]
 pub enum GamePhase {
     Menu,
     Playing,

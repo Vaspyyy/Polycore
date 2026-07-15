@@ -9,7 +9,7 @@ use crate::{
 };
 use bevy::prelude::*;
 
-pub const MAX_KILL_XP: u32 = 900;
+pub const MAX_KILL_XP: u32 = 2_000;
 
 #[derive(Component, Clone, Copy, Debug, Default)]
 pub struct CombatStats {
@@ -187,7 +187,8 @@ mod tests {
         assert_eq!(kill_xp(0), 0);
         assert_eq!(kill_xp(500), 250);
         assert_eq!(kill_xp(1_800), 900);
-        assert_eq!(kill_xp(10_000), 900);
+        assert_eq!(kill_xp(4_000), 2_000);
+        assert_eq!(kill_xp(10_000), 2_000);
     }
 
     #[test]
@@ -246,7 +247,7 @@ mod tests {
             .single(app.world())
             .unwrap();
         assert_eq!(player_stats.life_score, 2_000);
-        assert_eq!(app.world().resource::<Xp>().0, 900);
-        assert_eq!(app.world().resource::<TotalXp>().0, 900);
+        assert_eq!(app.world().resource::<Xp>().0, 2_000);
+        assert_eq!(app.world().resource::<TotalXp>().0, 2_000);
     }
 }

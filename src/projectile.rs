@@ -303,6 +303,35 @@ pub fn projectile_update(
 mod tests {
     use super::*;
 
+    fn simulate_projectile_with_power_mode(low_power: bool) -> (Vec3, f32, f32) {
+        let mut world = World::new();
+        let mut profile = crate::profile::Profile::test_with_path(None);
+        profile.data.settings.low_power_mode = low_power;
+        world.insert_resource(profile);
+        let mut time = Time::<()>::default();
+        time.advance_by(std::time::Duration::from_micros(15_625));
+        world.insert_resource(time);
+        let projectile = world
+            .spawn((
+                Projectile,
+                Transform::default(),
+                Velocity(Vec2::new(80.0, -20.0)),
+                Lifetime(2.0),
+                ProjectileTravel::default(),
+                ProjectileRadius(constants::PROJECTILE_RADIUS),
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(projectile_update);
+        for _ in 0..16 {
+            schedule.run(&mut world);
+        }
+        let transform = world.get::<Transform>(projectile).unwrap().translation;
+        let lifetime = world.get::<Lifetime>(projectile).unwrap().0;
+        let travel = world.get::<ProjectileTravel>(projectile).unwrap().0;
+        (transform, lifetime, travel)
+    }
+
     #[test]
     fn projectile_size_tracks_damage_upgrades_and_heavy_evolutions() {
         let base_upgrades = UpgradeState::default();
@@ -333,6 +362,14 @@ mod tests {
                 > projectile_radius(&base_upgrades, &cannon)
         );
         assert_eq!(projectile_radius(&base_upgrades, &rail_cannon), base_radius);
+    }
+
+    #[test]
+    fn low_power_mode_does_not_change_projectile_gameplay_state() {
+        assert_eq!(
+            simulate_projectile_with_power_mode(false),
+            simulate_projectile_with_power_mode(true)
+        );
     }
 
     #[test]

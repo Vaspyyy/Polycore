@@ -24,8 +24,8 @@ pub struct CombatFeedback {
 
 #[derive(Component)]
 pub(crate) struct EffectParticle {
-    velocity: Vec2,
-    remaining: f32,
+    pub(crate) velocity: Vec2,
+    pub(crate) remaining: f32,
 }
 
 #[derive(Resource, Default)]
@@ -415,7 +415,7 @@ pub fn consume_feedback(
         if message.intensity <= 0.0 {
             continue;
         }
-        let count = (4.0 + message.intensity * 5.0).round() as usize;
+        let count = combat_particle_count(message.intensity, profile.data.settings.low_power_mode);
         for index in 0..count {
             let entity = pool.entities[pool.cursor % pool.entities.len()];
             pool.cursor = pool.cursor.wrapping_add(1);
@@ -444,6 +444,15 @@ pub fn consume_feedback(
                 }
             }
         }
+    }
+}
+
+fn combat_particle_count(intensity: f32, low_power: bool) -> usize {
+    let normal_count = (4.0 + intensity * 5.0).round() as usize;
+    if low_power {
+        normal_count.min(2)
+    } else {
+        normal_count
     }
 }
 
@@ -526,5 +535,12 @@ mod tests {
             assert!(center.normalize().dot(screen_direction) > 0.999);
             assert!(arrow_direction.dot(-screen_direction) > 0.999);
         }
+    }
+
+    #[test]
+    fn low_power_caps_only_presentation_particles() {
+        assert_eq!(combat_particle_count(1.0, false), 9);
+        assert_eq!(combat_particle_count(1.0, true), 2);
+        assert_eq!(combat_particle_count(2.0, true), 2);
     }
 }

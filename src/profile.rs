@@ -35,12 +35,13 @@ pub struct RecordData {
     pub hotspots_survived: u32,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SettingsData {
     pub screen_shake: f32,
     pub damage_indicators: bool,
     pub fullscreen: bool,
+    pub low_power_mode: bool,
 }
 
 impl Default for SettingsData {
@@ -49,6 +50,7 @@ impl Default for SettingsData {
             screen_shake: 0.35,
             damage_indicators: true,
             fullscreen: false,
+            low_power_mode: false,
         }
     }
 }
@@ -196,6 +198,11 @@ impl Profile {
         Self { data, path, dirty }
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_with_path(path: Option<PathBuf>) -> Self {
+        Self::load_from(path, None)
+    }
+
     pub fn set_player_name(&mut self, name: &str) {
         let name = sanitize_player_name(name);
         if self.data.identity.player_name != name {
@@ -246,8 +253,8 @@ impl Profile {
     }
 }
 
-pub fn flush_profile(mut profile: ResMut<Profile>) {
-    if profile.is_dirty() {
+pub fn flush_profile(phase: Res<crate::menu::GamePhase>, mut profile: ResMut<Profile>) {
+    if *phase != crate::menu::GamePhase::Playing && profile.is_dirty() {
         let _ = profile.save();
     }
 }
@@ -286,7 +293,7 @@ fn write_profile(path: &Path, data: &ProfileData) -> std::io::Result<()> {
     fs::rename(temporary, path)
 }
 
-fn config_dir() -> Option<PathBuf> {
+pub(crate) fn config_dir() -> Option<PathBuf> {
     if let Ok(config_home) = env::var("XDG_CONFIG_HOME") {
         return Some(PathBuf::from(config_home).join("polycore"));
     }
@@ -334,11 +341,14 @@ mod tests {
         assert!(profile.unlock(AchievementId::FirstKill));
         assert!(!profile.unlock(AchievementId::FirstKill));
         assert!(profile.select_palette(PaletteId::Ember));
+        profile.data.settings.low_power_mode = true;
+        profile.mark_dirty();
         profile.save().unwrap();
 
         let loaded = Profile::load_from(Some(path), None);
         assert_eq!(loaded.data.identity.player_name, "Pilot");
         assert_eq!(loaded.data.selected_palette, PaletteId::Ember);
+        assert!(loaded.data.settings.low_power_mode);
         assert!(loaded.data.achievements.contains(&AchievementId::FirstKill));
         let _ = fs::remove_dir_all(root);
     }
@@ -368,6 +378,7 @@ mod tests {
         assert_eq!(profile.data.version, PROFILE_VERSION);
         assert_eq!(profile.data.settings.screen_shake, 0.35);
         assert!(profile.data.settings.damage_indicators);
+        assert!(!profile.data.settings.low_power_mode);
         assert!(!profile.is_dirty());
     }
 
@@ -397,7 +408,31 @@ mod tests {
         assert!(profile.data.records.used_level_thirty_evolutions.is_empty());
         assert_eq!(profile.data.records.hotspot_high_tier_shapes_destroyed, 0);
         assert_eq!(profile.data.records.hotspots_survived, 0);
+        assert!(!profile.data.settings.low_power_mode);
         assert!(profile.is_dirty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn dirty_profile_is_not_written_while_playing() {
+        let root = test_path("safe-state-save");
+        let path = root.join("profile.json");
+        let _ = fs::remove_dir_all(&root);
+        let mut world = World::new();
+        let mut profile = Profile::load_from(Some(path.clone()), None);
+        profile.set_player_name("Unsaved Pilot");
+        world.insert_resource(profile);
+        world.insert_resource(crate::menu::GamePhase::Playing);
+        let mut schedule = Schedule::default();
+        schedule.add_systems(flush_profile);
+        schedule.run(&mut world);
+        assert!(!path.exists());
+        assert!(world.resource::<Profile>().is_dirty());
+
+        *world.resource_mut::<crate::menu::GamePhase>() = crate::menu::GamePhase::Paused;
+        schedule.run(&mut world);
+        assert!(path.exists());
+        assert!(!world.resource::<Profile>().is_dirty());
         let _ = fs::remove_dir_all(root);
     }
 

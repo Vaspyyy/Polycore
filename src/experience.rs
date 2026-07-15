@@ -12,6 +12,7 @@ pub enum SettingsAction {
     ShakeUp,
     DamageIndicators,
     Fullscreen,
+    LowPowerMode,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -19,6 +20,7 @@ pub enum SettingsValue {
     Shake,
     DamageIndicators,
     Fullscreen,
+    LowPowerMode,
 }
 
 pub fn setup_experience_ui(mut commands: Commands) {
@@ -79,6 +81,11 @@ pub fn setup_experience_ui(mut commands: Commands) {
                     "Fullscreen",
                     SettingsValue::Fullscreen,
                     SettingsAction::Fullscreen,
+                ));
+                panel.spawn(setting_toggle(
+                    "Low-power mode",
+                    SettingsValue::LowPowerMode,
+                    SettingsAction::LowPowerMode,
                 ));
                 panel.spawn(action_button("Resume", SettingsAction::Resume));
                 panel.spawn(action_button(
@@ -266,6 +273,9 @@ pub fn handle_settings_buttons(
             SettingsAction::Fullscreen => {
                 profile.data.settings.fullscreen = !profile.data.settings.fullscreen;
             }
+            SettingsAction::LowPowerMode => {
+                profile.data.settings.low_power_mode = !profile.data.settings.low_power_mode;
+            }
         }
         if settings_changed {
             profile.data.settings.screen_shake = profile.data.settings.screen_shake.clamp(0.0, 1.0);
@@ -277,11 +287,13 @@ pub fn handle_settings_buttons(
 pub fn update_settings_labels(
     profile: Res<Profile>,
     mut labels: Query<(&SettingsValue, &mut Text)>,
+    mut last_settings: Local<Option<crate::profile::SettingsData>>,
 ) {
-    if !profile.is_changed() {
+    let settings = &profile.data.settings;
+    if last_settings.as_ref() == Some(settings) {
         return;
     }
-    let settings = &profile.data.settings;
+    *last_settings = Some(settings.clone());
     for (value, mut text) in &mut labels {
         **text = match value {
             SettingsValue::Shake => format!("{}%", (settings.screen_shake * 100.0).round()),
@@ -297,17 +309,55 @@ pub fn update_settings_labels(
                 "Fullscreen: {}",
                 if settings.fullscreen { "On" } else { "Off" }
             ),
+            SettingsValue::LowPowerMode => format!(
+                "Low-power mode: {}",
+                if settings.low_power_mode { "On" } else { "Off" }
+            ),
         };
     }
 }
 
 pub fn apply_window_settings(profile: Res<Profile>, mut window: Single<&mut Window>) {
-    if !profile.is_changed() {
-        return;
-    }
-    window.mode = if profile.data.settings.fullscreen {
+    let desired_mode = if profile.data.settings.fullscreen {
         bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Current)
     } else {
         bevy::window::WindowMode::Windowed
     };
+    if window.mode != desired_mode {
+        window.mode = desired_mode;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn record_changes_do_not_touch_settings_ui_or_window_mode() {
+        let mut world = World::new();
+        world.insert_resource(Profile::test_with_path(None));
+        let window = world.spawn(Window::default()).id();
+        let label = world
+            .spawn((SettingsValue::Shake, Text::new("initial")))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems((update_settings_labels, apply_window_settings));
+        schedule.run(&mut world);
+        world.clear_trackers();
+
+        world.resource_mut::<Profile>().data.records.best_life_score = 42;
+        schedule.run(&mut world);
+        assert!(!world.entity(label).get_ref::<Text>().unwrap().is_changed());
+        assert!(
+            !world
+                .entity(window)
+                .get_ref::<Window>()
+                .unwrap()
+                .is_changed()
+        );
+        assert_eq!(
+            world.get::<Window>(window).unwrap().mode,
+            bevy::window::WindowMode::Windowed
+        );
+    }
 }

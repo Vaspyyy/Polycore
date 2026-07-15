@@ -120,9 +120,8 @@ pub fn check_collisions(
         ),
         (With<EnemyBot>, Without<Player>),
     >,
+    mut nearby: Local<Vec<crate::spatial::SpatialEntry>>,
 ) {
-    let mut nearby = Vec::new();
-
     for (
         proj_entity,
         proj_transform,
@@ -338,8 +337,8 @@ pub fn check_projectile_enemy_bot_collisions(
         >,
         Query<(&mut PassiveRuntime, &mut ActiveAbilityState), With<EnemyBot>>,
     )>,
+    mut nearby: Local<Vec<crate::spatial::SpatialEntry>>,
 ) {
-    let mut nearby = Vec::new();
     for (
         proj_entity,
         proj_transform,
@@ -1446,9 +1445,9 @@ pub fn check_enemy_bot_shape_collisions(
         ),
         (With<Shape>, Without<EnemyBot>),
     >,
+    mut nearby: Local<Vec<crate::spatial::SpatialEntry>>,
 ) {
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
-    let mut nearby = Vec::new();
 
     for (
         bot_entity,
@@ -1615,11 +1614,11 @@ pub fn check_enemy_bot_enemy_bot_collisions(
         ),
         With<EnemyBot>,
     >,
+    mut pairs: Local<Vec<(Entity, Entity)>>,
 ) {
     let dt = time.delta_secs();
-    for (candidate_a, candidate_b) in
-        grid.unique_pairs_of_kind(150.0, crate::spatial::SpatialKind::Tank)
-    {
+    grid.unique_pairs_of_kind_into(150.0, crate::spatial::SpatialKind::Tank, &mut pairs);
+    for (candidate_a, candidate_b) in pairs.iter().copied() {
         let Ok(
             [
                 (
@@ -1761,15 +1760,19 @@ pub fn check_shape_shape_collisions(
         ),
         With<Shape>,
     >,
+    mut pairs: Local<Vec<(Entity, Entity)>>,
+    mut dead_shapes: Local<Vec<Entity>>,
 ) {
     let collision_distance = constants::SHAPE_RADIUS * 2.0;
     let collision_distance_sq = collision_distance * collision_distance;
     let shape_half = constants::arena_half_extent() - constants::SHAPE_RADIUS;
-    let mut dead_shapes = Vec::new();
-
-    for (candidate_a, candidate_b) in
-        grid.unique_pairs_of_kind(collision_distance, crate::spatial::SpatialKind::Shape)
-    {
+    dead_shapes.clear();
+    grid.unique_pairs_of_kind_into(
+        collision_distance,
+        crate::spatial::SpatialKind::Shape,
+        &mut pairs,
+    );
+    for (candidate_a, candidate_b) in pairs.iter().copied() {
         let Ok(
             [
                 (entity_a, mut transform_a, mut health_a, mut velocity_a, mut cooldown_a),
@@ -1831,7 +1834,7 @@ pub fn check_shape_shape_collisions(
         }
     }
 
-    for entity in dead_shapes {
+    for entity in dead_shapes.iter().copied() {
         commands.entity(entity).despawn();
     }
 }

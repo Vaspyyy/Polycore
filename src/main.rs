@@ -14,6 +14,7 @@ mod leaderboard;
 mod menu;
 mod palette;
 mod passive;
+mod performance;
 mod player;
 mod profile;
 mod profile_ui;
@@ -24,9 +25,13 @@ mod spatial;
 mod tank;
 
 use bevy::{
+    asset::RenderAssetUsages,
     input::mouse::{AccumulatedMouseScroll, MouseScrollUnit},
+    mesh::Indices,
     prelude::*,
+    render::render_resource::PrimitiveTopology,
 };
+use std::time::Duration;
 
 #[derive(Component)]
 struct ZoomVignette;
@@ -66,6 +71,7 @@ fn main() {
             constants::BG_COLOR[2],
             constants::BG_COLOR[3],
         )))
+        .insert_resource(Time::<Virtual>::from_max_delta(Duration::from_millis(50)))
         .insert_resource(rng::Rng::from_entropy())
         .insert_resource(spatial::SpatialGrid::default())
         .insert_resource(menu::GamePhase::Menu)
@@ -85,6 +91,7 @@ fn main() {
         .insert_resource(dominance::ProfileProgressTracker::default())
         .insert_resource(feedback::FeedbackTracker::default())
         .insert_resource(feedback::CameraShake::default())
+        .insert_resource(performance::PerformanceTelemetry::default())
         .add_message::<feedback::CombatFeedback>()
         .add_message::<dominance::AchievementUnlocked>()
         .add_message::<ability::AbilityCast>()
@@ -123,6 +130,7 @@ fn main() {
                 profile_ui::setup_profile_panel,
                 experience::setup_experience_ui,
                 feedback::setup_feedback,
+                performance::setup_performance_overlay,
             )
                 .chain(),
         )
@@ -138,6 +146,15 @@ fn main() {
             )
                 .chain()
                 .run_if(menu::is_simulating),
+        )
+        .add_systems(
+            Update,
+            (
+                performance::toggle_performance_overlay,
+                performance::sample_performance,
+                performance::flush_performance_log,
+            )
+                .chain(),
         )
         .add_systems(
             Update,
@@ -192,6 +209,7 @@ fn main() {
                 experience::sync_pause_visibility,
                 experience::update_settings_labels,
                 experience::apply_window_settings,
+                apply_low_power_visuals,
             ),
         )
         .add_systems(
@@ -246,6 +264,7 @@ fn main() {
             )
                 .run_if(menu::is_simulating),
         )
+        .add_systems(FixedUpdate, performance::count_fixed_step)
         .add_systems(
             FixedUpdate,
             (
@@ -328,7 +347,7 @@ fn main() {
 }
 
 fn setup_camera(mut commands: Commands) {
-    commands.spawn(Camera2d);
+    commands.spawn((Camera2d, Msaa::Sample4));
     commands.spawn((
         ZoomVignette,
         Node {
@@ -386,6 +405,7 @@ fn camera_follow(
 
 fn camera_zoom(
     scroll: Res<AccumulatedMouseScroll>,
+    profile: Res<profile::Profile>,
     mut camera: Query<&mut Projection, With<Camera>>,
     mut vignette: Query<(&mut BackgroundGradient, &mut Visibility), With<ZoomVignette>>,
 ) {
@@ -414,7 +434,11 @@ fn camera_zoom(
     orthographic.scale = (orthographic.scale * zoom_factor)
         .clamp(constants::CAMERA_MIN_ZOOM, constants::CAMERA_MAX_ZOOM);
 
-    let strength = zoom_warning_strength(orthographic.scale);
+    let strength = if profile.data.settings.low_power_mode {
+        0.0
+    } else {
+        zoom_warning_strength(orthographic.scale)
+    };
     for (mut gradient, mut visibility) in vignette.iter_mut() {
         *visibility = if strength > 0.001 {
             Visibility::Visible
@@ -441,6 +465,27 @@ fn hide_zoom_vignette(
     }
     for mut visibility in vignette.iter_mut() {
         *visibility = Visibility::Hidden;
+    }
+}
+
+fn apply_low_power_visuals(
+    profile: Res<profile::Profile>,
+    mut cameras: Query<&mut Msaa, With<Camera2d>>,
+    mut vignette: Query<&mut Visibility, With<ZoomVignette>>,
+    mut last_low_power: Local<Option<bool>>,
+) {
+    let low_power = profile.data.settings.low_power_mode;
+    if *last_low_power == Some(low_power) {
+        return;
+    }
+    *last_low_power = Some(low_power);
+    for mut msaa in &mut cameras {
+        *msaa = if low_power { Msaa::Off } else { Msaa::Sample4 };
+    }
+    if low_power {
+        for mut visibility in &mut vignette {
+            *visibility = Visibility::Hidden;
+        }
     }
 }
 
@@ -481,47 +526,64 @@ fn setup_grid(
     let thickness = 2.0;
     let grid_z = -10.0;
     let border_z = -9.0;
-
-    let vertical_line = meshes.add(Rectangle::new(thickness, extent));
-    let horizontal_line = meshes.add(Rectangle::new(extent, thickness));
-
+    let mut grid_rectangles = Vec::new();
     let mut x = -half;
     while x <= half {
-        commands.spawn((
-            Mesh2d(vertical_line.clone()),
-            MeshMaterial2d(grid_material.clone()),
-            Transform::from_xyz(x, 0.0, grid_z),
-        ));
+        grid_rectangles.push((Vec2::new(x, 0.0), Vec2::new(thickness, extent)));
         x += spacing;
     }
-
     let mut y = -half;
     while y <= half {
-        commands.spawn((
-            Mesh2d(horizontal_line.clone()),
-            MeshMaterial2d(grid_material.clone()),
-            Transform::from_xyz(0.0, y, grid_z),
-        ));
+        grid_rectangles.push((Vec2::new(0.0, y), Vec2::new(extent, thickness)));
         y += spacing;
     }
+    commands.spawn((
+        Mesh2d(meshes.add(rectangle_batch_mesh(&grid_rectangles))),
+        MeshMaterial2d(grid_material),
+        Transform::from_xyz(0.0, 0.0, grid_z),
+    ));
 
     let border_thickness = constants::BORDER_THICKNESS;
-    let vertical_border = meshes.add(Rectangle::new(border_thickness, extent + border_thickness));
-    let horizontal_border = meshes.add(Rectangle::new(extent + border_thickness, border_thickness));
+    let mut border_rectangles = Vec::with_capacity(4);
     for x in [-half, half] {
-        commands.spawn((
-            Mesh2d(vertical_border.clone()),
-            MeshMaterial2d(border_material.clone()),
-            Transform::from_xyz(x, 0.0, border_z),
+        border_rectangles.push((
+            Vec2::new(x, 0.0),
+            Vec2::new(border_thickness, extent + border_thickness),
         ));
     }
     for y in [-half, half] {
-        commands.spawn((
-            Mesh2d(horizontal_border.clone()),
-            MeshMaterial2d(border_material.clone()),
-            Transform::from_xyz(0.0, y, border_z),
+        border_rectangles.push((
+            Vec2::new(0.0, y),
+            Vec2::new(extent + border_thickness, border_thickness),
         ));
     }
+    commands.spawn((
+        Mesh2d(meshes.add(rectangle_batch_mesh(&border_rectangles))),
+        MeshMaterial2d(border_material),
+        Transform::from_xyz(0.0, 0.0, border_z),
+    ));
+}
+
+fn rectangle_batch_mesh(rectangles: &[(Vec2, Vec2)]) -> Mesh {
+    let mut positions = Vec::with_capacity(rectangles.len() * 4);
+    let mut indices = Vec::with_capacity(rectangles.len() * 6);
+    for (center, size) in rectangles {
+        let half = *size * 0.5;
+        let base = positions.len() as u32;
+        positions.extend([
+            [center.x - half.x, center.y - half.y, 0.0],
+            [center.x + half.x, center.y - half.y, 0.0],
+            [center.x + half.x, center.y + half.y, 0.0],
+            [center.x - half.x, center.y + half.y, 0.0],
+        ]);
+        indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_indices(Indices::U32(indices))
 }
 
 #[cfg(test)]
@@ -552,5 +614,53 @@ mod tests {
             hotspot::update_hotspot,
         ));
         fixed.initialize(&mut world).unwrap();
+    }
+
+    #[test]
+    fn arena_rectangles_are_batched_into_single_meshes() {
+        let mesh = rectangle_batch_mesh(&[
+            (Vec2::ZERO, Vec2::new(2.0, 10.0)),
+            (Vec2::X, Vec2::new(10.0, 2.0)),
+        ]);
+        assert_eq!(mesh.count_vertices(), 8);
+        assert_eq!(mesh.indices().map(Indices::len), Some(12));
+    }
+
+    #[test]
+    fn virtual_time_caps_stall_recovery_at_three_fixed_steps() {
+        let virtual_time = Time::<Virtual>::from_max_delta(Duration::from_millis(50));
+        let fixed_time = Time::<Fixed>::default();
+        assert_eq!(virtual_time.max_delta(), Duration::from_millis(50));
+        assert_eq!(fixed_time.timestep(), Duration::from_micros(15_625));
+        assert_eq!(
+            virtual_time.max_delta().as_nanos() / fixed_time.timestep().as_nanos(),
+            3
+        );
+    }
+
+    #[test]
+    fn low_power_switches_msaa_and_hides_vignette() {
+        let mut world = World::new();
+        let mut profile = profile::Profile::test_with_path(None);
+        profile.data.settings.low_power_mode = true;
+        world.insert_resource(profile);
+        let camera = world.spawn((Camera2d, Msaa::Sample4)).id();
+        let vignette = world.spawn((ZoomVignette, Visibility::Visible)).id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(apply_low_power_visuals);
+        schedule.run(&mut world);
+        assert_eq!(*world.get::<Msaa>(camera).unwrap(), Msaa::Off);
+        assert_eq!(
+            *world.get::<Visibility>(vignette).unwrap(),
+            Visibility::Hidden
+        );
+
+        world
+            .resource_mut::<profile::Profile>()
+            .data
+            .settings
+            .low_power_mode = false;
+        schedule.run(&mut world);
+        assert_eq!(*world.get::<Msaa>(camera).unwrap(), Msaa::Sample4);
     }
 }

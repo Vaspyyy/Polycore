@@ -610,6 +610,7 @@ pub fn execute_ability_casts(
         ),
         With<Projectile>,
     >,
+    mut airburst_shells: Local<Vec<(Entity, Vec2, f32)>>,
 ) {
     for cast in casts.read() {
         let Ok((
@@ -712,24 +713,22 @@ pub fn execute_ability_casts(
             ),
             ActiveAbilityKind::Brace => state.active_remaining = 4.0,
             ActiveAbilityKind::Airburst => {
-                let shells = projectiles
-                    .iter_mut()
-                    .filter_map(
-                        |(entity, shot_transform, _, shot_owner, shot_damage, _, _, shot_kind)| {
-                            (*shot_owner == owner
-                                && matches!(
-                                    shot_kind.0,
-                                    EvolutionKind::Annihilator | EvolutionKind::Siegebreaker
-                                ))
-                            .then_some((
-                                entity,
-                                shot_transform.translation.xy(),
-                                shot_damage.0,
+                airburst_shells.clear();
+                airburst_shells.extend(projectiles.iter_mut().filter_map(
+                    |(entity, shot_transform, _, shot_owner, shot_damage, _, _, shot_kind)| {
+                        (*shot_owner == owner
+                            && matches!(
+                                shot_kind.0,
+                                EvolutionKind::Annihilator | EvolutionKind::Siegebreaker
                             ))
-                        },
-                    )
-                    .collect::<Vec<_>>();
-                for (entity, shell_position, shell_damage) in shells {
+                        .then_some((
+                            entity,
+                            shot_transform.translation.xy(),
+                            shot_damage.0,
+                        ))
+                    },
+                ));
+                for (entity, shell_position, shell_damage) in airburst_shells.iter().copied() {
                     commands.entity(entity).despawn();
                     commands.spawn(crate::collision::PendingSplash {
                         position: shell_position,
@@ -1056,9 +1055,10 @@ pub fn tick_abilities(
         ),
         With<Projectile>,
     >,
+    mut shield_walls: Local<Vec<(Entity, ProjectileOwner, u32, Vec2, Vec2)>>,
 ) {
     let dt = time.delta_secs();
-    let mut shield_walls = Vec::new();
+    shield_walls.clear();
     for (entity, transform, mut state, generation, bot_evolution, slow, _, _) in &mut actors {
         let evolution = bot_evolution.map_or(player_evolution.current_kind, |e| e.0.current_kind);
         state.sync_evolution(evolution);
@@ -1091,7 +1091,7 @@ pub fn tick_abilities(
             ));
         }
     }
-    for (actor, owner, generation, position, direction) in shield_walls {
+    for (actor, owner, generation, position, direction) in shield_walls.iter().copied() {
         reflect_projectiles(
             actor,
             owner,
@@ -1408,25 +1408,20 @@ pub fn update_constructs(
                         .total_cmp(&b.translation.xy().distance_squared(position))
                 })
                 .map(|(_, transform, _, _)| transform.translation.xy()),
-            ProjectileOwner::EnemyBot(owner) => {
-                let mut targets = player
-                    .iter()
-                    .filter(|(_, _, health, _)| health.current > 0.0)
-                    .map(|(_, target, _, _)| target.translation.xy())
-                    .collect::<Vec<_>>();
-                targets.extend(
+            ProjectileOwner::EnemyBot(owner) => player
+                .iter()
+                .filter(|(_, _, health, _)| health.current > 0.0)
+                .map(|(_, target, _, _)| target.translation.xy())
+                .chain(
                     bots.iter()
                         .filter(|(entity, _, health, _)| *entity != owner && health.current > 0.0)
                         .map(|(_, target, _, _)| target.translation.xy()),
-                );
-                targets
-                    .into_iter()
-                    .filter(|target| target.distance(position) <= construct.range)
-                    .min_by(|a, b| {
-                        a.distance_squared(position)
-                            .total_cmp(&b.distance_squared(position))
-                    })
-            }
+                )
+                .filter(|target| target.distance(position) <= construct.range)
+                .min_by(|a, b| {
+                    a.distance_squared(position)
+                        .total_cmp(&b.distance_squared(position))
+                }),
         };
         let Some(target) = target else {
             continue;
@@ -1511,9 +1506,10 @@ pub fn resolve_construct_collisions(
         ),
     >,
     mut passives: Query<&mut crate::passive::PassiveRuntime>,
+    mut consumed_projectiles: Local<Vec<Entity>>,
 ) {
     let player_entity = player.single().ok().map(|player| player.0);
-    let mut consumed_projectiles = Vec::new();
+    consumed_projectiles.clear();
     for (construct_entity, construct_transform, mut construct) in &mut constructs {
         let center = construct_transform.translation.xy();
         for (projectile_entity, shot_transform, owner, damage, radius) in &mut projectiles {

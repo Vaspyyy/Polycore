@@ -22,7 +22,7 @@ use crate::{
     spatial::{SpatialGrid, SpatialKind},
     tank::{ProjectileCorridor, RecentDamage, SpawnProtection},
 };
-use bevy::prelude::*;
+use bevy::{ecs::system::SystemParam, prelude::*};
 
 const TURRET_IDLE_SPIN_SPEED: f32 = 0.45;
 const FLEE_RECOVERY_MARGIN: f32 = 0.18;
@@ -162,6 +162,22 @@ struct TargetSnapshot {
     recent_damage: f32,
     is_leader: bool,
     is_hotspot: bool,
+}
+
+#[derive(Default)]
+struct AiScratch {
+    combat_targets: Vec<TargetSnapshot>,
+    shape_targets: Vec<TargetSnapshot>,
+    nearby_entries: Vec<crate::spatial::SpatialEntry>,
+    visible_combat: Vec<TargetSnapshot>,
+    visible_shapes: Vec<TargetSnapshot>,
+    nearby_threats: Vec<TargetSnapshot>,
+}
+
+#[derive(SystemParam)]
+pub(crate) struct AiSpatial<'w, 's> {
+    grid: Res<'w, SpatialGrid>,
+    scratch: Local<'s, AiScratch>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -330,7 +346,7 @@ pub fn enemy_bot_ai_update(
     player_level: Res<Level>,
     player_upgrades: Res<crate::hud::UpgradeState>,
     player_evolution: Res<crate::evolution::EvolutionState>,
-    grid: Res<SpatialGrid>,
+    spatial: AiSpatial,
     dominance: Res<DominanceState>,
     mut bots: ParamSet<(
         Query<
@@ -411,7 +427,16 @@ pub fn enemy_bot_ai_update(
     let dt = time.delta_secs();
     let damping = (1.0 - constants::PLAYER_KNOCKBACK_DAMPING * dt).clamp(0.0, 1.0);
 
-    let mut combat_targets = Vec::new();
+    let AiSpatial { grid, mut scratch } = spatial;
+    let AiScratch {
+        combat_targets,
+        shape_targets,
+        nearby_entries,
+        visible_combat,
+        visible_shapes,
+        nearby_threats,
+    } = &mut *scratch;
+    combat_targets.clear();
     if let Ok((entity, transform, health, move_velocity, knockback_velocity, stats, recent)) =
         player.single()
         && health.current > 0.0
@@ -469,30 +494,30 @@ pub fn enemy_bot_ai_update(
                 },
             ),
     );
-    let shape_targets = shapes
-        .iter()
-        .filter(|(_, _, health, _, _, _)| health.0 > 0.0)
-        .map(
-            |(entity, transform, health, max_health, xp, hotspot)| TargetSnapshot {
-                entity,
-                kind: EnemyBotTargetKind::Shape,
-                position: transform.translation.xy(),
-                velocity: Vec2::ZERO,
-                health_fraction: (health.0 / max_health.0.max(1.0)).clamp(0.0, 1.0),
-                current_health: health.0,
-                level: 0,
-                reward: xp.0,
-                dps: 0.0,
-                effective_health: health.0,
-                evolution_power: 0.0,
-                recent_damage: 0.0,
-                is_leader: false,
-                is_hotspot: hotspot.is_some_and(|marker| !marker.expired),
-            },
-        )
-        .collect::<Vec<_>>();
-
-    let mut nearby_entries = Vec::new();
+    shape_targets.clear();
+    shape_targets.extend(
+        shapes
+            .iter()
+            .filter(|(_, _, health, _, _, _)| health.0 > 0.0)
+            .map(
+                |(entity, transform, health, max_health, xp, hotspot)| TargetSnapshot {
+                    entity,
+                    kind: EnemyBotTargetKind::Shape,
+                    position: transform.translation.xy(),
+                    velocity: Vec2::ZERO,
+                    health_fraction: (health.0 / max_health.0.max(1.0)).clamp(0.0, 1.0),
+                    current_health: health.0,
+                    level: 0,
+                    reward: xp.0,
+                    dps: 0.0,
+                    effective_health: health.0,
+                    evolution_power: 0.0,
+                    recent_damage: 0.0,
+                    is_leader: false,
+                    is_hotspot: hotspot.is_some_and(|marker| !marker.expired),
+                },
+            ),
+    );
 
     for (
         bot_entity,
@@ -541,19 +566,16 @@ pub fn enemy_bot_ai_update(
         update_strafe(&mut brain, &mut rng);
 
         let bot_pos = transform.translation.xy();
-        grid.nearby_into(bot_pos, tuning.view_range.max(1_000.0), &mut nearby_entries);
-        let mut visible_combat = combat_targets
-            .iter()
-            .copied()
-            .filter(|target| {
-                target.entity != bot_entity
-                    && nearby_entries.iter().any(|entry| {
-                        entry.entity == target.entity && entry.kind == SpatialKind::Tank
-                    })
-                    && target.position.distance_squared(bot_pos)
-                        <= tuning.view_range * tuning.view_range
-            })
-            .collect::<Vec<_>>();
+        grid.nearby_into(bot_pos, tuning.view_range.max(1_000.0), nearby_entries);
+        visible_combat.clear();
+        visible_combat.extend(combat_targets.iter().copied().filter(|target| {
+            target.entity != bot_entity
+                && nearby_entries
+                    .iter()
+                    .any(|entry| entry.entity == target.entity && entry.kind == SpatialKind::Tank)
+                && target.position.distance_squared(bot_pos)
+                    <= tuning.view_range * tuning.view_range
+        }));
         let challenge_target = bot_context
             .get(bot_entity)
             .ok()
@@ -571,15 +593,12 @@ pub fn enemy_bot_ai_update(
         {
             visible_combat.push(target);
         }
-        let visible_shapes = shape_targets
-            .iter()
-            .copied()
-            .filter(|target| {
-                nearby_entries
-                    .iter()
-                    .any(|entry| entry.entity == target.entity && entry.kind == SpatialKind::Shape)
-            })
-            .collect::<Vec<_>>();
+        visible_shapes.clear();
+        visible_shapes.extend(shape_targets.iter().copied().filter(|target| {
+            nearby_entries
+                .iter()
+                .any(|entry| entry.entity == target.entity && entry.kind == SpatialKind::Shape)
+        }));
         let (passive_movement, ability_movement, forced_forward, limited_turning) =
             bot_context.get(bot_entity).map_or(
                 (1.0, 1.0, false, false),
@@ -600,11 +619,13 @@ pub fn enemy_bot_ai_update(
         let low_health_threat_radius = (tuning.personal_space
             * LOW_HEALTH_THREAT_RADIUS_MULTIPLIER)
             .max(LOW_HEALTH_MIN_THREAT_RADIUS);
-        let nearby_threats = visible_combat
-            .iter()
-            .copied()
-            .filter(|target| bot_pos.distance(target.position) <= low_health_threat_radius)
-            .collect::<Vec<_>>();
+        nearby_threats.clear();
+        nearby_threats.extend(
+            visible_combat
+                .iter()
+                .copied()
+                .filter(|target| bot_pos.distance(target.position) <= low_health_threat_radius),
+        );
         let health_fraction = health.current / health.max.max(1.0);
         let hotspot_interest = playstyle.hotspot_interest()
             * if health_fraction < 0.45 { 0.65 } else { 1.0 }
@@ -631,9 +652,9 @@ pub fn enemy_bot_ai_update(
         let defensive_intruder = if is_ram_build {
             None
         } else {
-            personal_space_intruder(bot_pos, &visible_combat, tuning)
+            personal_space_intruder(bot_pos, visible_combat, tuning)
         };
-        let selected_target = current_target(&brain, &visible_combat, &visible_shapes);
+        let selected_target = current_target(&brain, visible_combat, visible_shapes);
         let engagement_expired = brain.target_kind == EnemyBotTargetKind::Combatant
             && !actively_fleeing
             && defensive_intruder.is_none()
@@ -647,9 +668,9 @@ pub fn enemy_bot_ai_update(
             set_brain_target(&mut brain, None, EnemyBotTargetKind::Shape);
         }
 
-        let selected_target = current_target(&brain, &visible_combat, &visible_shapes);
+        let selected_target = current_target(&brain, visible_combat, visible_shapes);
         if actively_fleeing {
-            let target = most_dangerous_target(bot_pos, &nearby_threats, &brain);
+            let target = most_dangerous_target(bot_pos, nearby_threats, &brain);
             set_brain_target(&mut brain, target, EnemyBotTargetKind::Combatant);
         } else if brain.fleeing {
             if brain.target_kind == EnemyBotTargetKind::Combatant
@@ -658,8 +679,8 @@ pub fn enemy_bot_ai_update(
             {
                 let shape = select_farm_target(
                     bot_pos,
-                    &visible_shapes,
-                    &visible_combat,
+                    visible_shapes,
+                    visible_combat,
                     damage_per_second,
                     movement_speed,
                     hotspot_interest,
@@ -681,8 +702,8 @@ pub fn enemy_bot_ai_update(
             {
                 let shape = select_farm_target(
                     bot_pos,
-                    &visible_shapes,
-                    &visible_combat,
+                    visible_shapes,
+                    visible_combat,
                     damage_per_second,
                     movement_speed,
                     hotspot_interest,
@@ -693,8 +714,8 @@ pub fn enemy_bot_ai_update(
         } else if brain.decision_timer <= 0.0 || selected_target.is_none() {
             let shape = select_farm_target(
                 bot_pos,
-                &visible_shapes,
-                &visible_combat,
+                visible_shapes,
+                visible_combat,
                 damage_per_second,
                 movement_speed,
                 hotspot_interest,
@@ -704,7 +725,7 @@ pub fn enemy_bot_ai_update(
                 *playstyle,
                 bot_pos,
                 bot_level.0,
-                &visible_combat,
+                visible_combat,
                 shape,
                 &brain,
                 damage_per_second,
@@ -726,17 +747,17 @@ pub fn enemy_bot_ai_update(
             brain.decision_timer = STRATEGIC_DECISION_INTERVAL;
         }
 
-        let target = current_target(&brain, &visible_combat, &visible_shapes);
-        let dodge = projectile_avoidance(bot_entity, bot_pos, &nearby_entries, &projectiles);
+        let target = current_target(&brain, visible_combat, visible_shapes);
+        let dodge = projectile_avoidance(bot_entity, bot_pos, nearby_entries, &projectiles);
         let half = constants::arena_half_extent() - crate::tank::radius(&evolution.0);
         let boundary = boundary_avoidance(bot_pos, half);
-        let social = social_avoidance(bot_pos, &visible_combat);
+        let social = social_avoidance(bot_pos, visible_combat);
         let desired_velocity = if forced_forward {
             Vec2::from_angle(brain.aim_angle) * movement_speed
         } else if actively_fleeing {
             flee_velocity(
                 bot_pos,
-                &nearby_threats,
+                nearby_threats,
                 &brain,
                 dodge,
                 boundary,

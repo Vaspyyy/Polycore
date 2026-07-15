@@ -8,6 +8,7 @@
   "settings": {
     "screen_shake": 0.35,
     "damage_indicators": true,
-    "fullscreen": false
+    "fullscreen": false,
+    "low_power_mode": false
   }
 }

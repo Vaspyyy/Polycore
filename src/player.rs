@@ -266,11 +266,14 @@ pub fn sync_player_palette(
         (&Barrel, &mut MeshMaterial2d<ColorMaterial>),
         (Without<Player>, Without<crate::tank::TankOutline>),
     >,
+    mut last_palette: Local<Option<crate::palette::PaletteId>>,
 ) {
-    if !profile.is_changed() {
+    let palette = profile.data.selected_palette;
+    if *last_palette == Some(palette) {
         return;
     }
-    let selected = palettes.player(profile.data.selected_palette);
+    *last_palette = Some(palette);
+    let selected = palettes.player(palette);
     if let Ok(mut material) = player.single_mut() {
         material.0 = selected.body.clone();
     }

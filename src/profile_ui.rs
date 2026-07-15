@@ -1,5 +1,5 @@
 use crate::{
-    menu::MenuRoot,
+    menu::{GamePhase, MenuRoot},
     palette::PaletteId,
     profile::{AchievementId, Profile},
 };
@@ -20,10 +20,63 @@ pub struct ProfileRecordsText;
 #[derive(Component)]
 pub struct AchievementProgressText;
 
+#[derive(Component)]
+pub struct ProfilePanelRoot;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ProfilePanelSnapshot {
+    selected_palette: PaletteId,
+    unlocked_palettes: usize,
+    achievement_bits: u16,
+    best_life_score: u32,
+    best_crown_streak_bits: u32,
+    lifetime_kills: u32,
+    lifetime_deaths: u32,
+    shapes_destroyed: u32,
+    longest_life_bits: u32,
+    total_crown_bits: u32,
+    best_life_kills: u32,
+    used_level_five: usize,
+    used_level_thirty: usize,
+    hotspot_high_tier_shapes_destroyed: u32,
+    hotspots_survived: u32,
+}
+
+impl ProfilePanelSnapshot {
+    fn capture(profile: &Profile) -> Self {
+        let records = &profile.data.records;
+        let achievement_bits =
+            AchievementId::ALL
+                .into_iter()
+                .enumerate()
+                .fold(0_u16, |bits, (index, achievement)| {
+                    bits | (u16::from(profile.data.achievements.contains(&achievement)) << index)
+                });
+        Self {
+            selected_palette: profile.data.selected_palette,
+            unlocked_palettes: profile.data.unlocked_palettes.len(),
+            achievement_bits,
+            best_life_score: records.best_life_score,
+            best_crown_streak_bits: records.best_crown_streak_secs.to_bits(),
+            lifetime_kills: records.lifetime_kills,
+            lifetime_deaths: records.lifetime_deaths,
+            shapes_destroyed: records.shapes_destroyed,
+            longest_life_bits: records.longest_life_secs.to_bits(),
+            total_crown_bits: records.total_crown_time_secs.to_bits(),
+            best_life_kills: records.best_life_kills,
+            used_level_five: records.used_level_five_evolutions.len(),
+            used_level_thirty: records.used_level_thirty_evolutions.len(),
+            hotspot_high_tier_shapes_destroyed: records.hotspot_high_tier_shapes_destroyed,
+            hotspots_survived: records.hotspots_survived,
+        }
+    }
+}
+
 pub fn setup_profile_panel(mut commands: Commands) {
     commands
         .spawn((
             MenuRoot,
+            ProfilePanelRoot,
             Node {
                 position_type: PositionType::Absolute,
                 left: Val::Percent(50.0),
@@ -157,6 +210,7 @@ pub fn handle_palette_buttons(
 
 pub fn update_profile_panel(
     profile: Res<Profile>,
+    phase: Res<GamePhase>,
     mut palette_text: Query<&mut Text, With<PaletteNameText>>,
     mut records_text: Query<&mut Text, (With<ProfileRecordsText>, Without<PaletteNameText>)>,
     mut achievement_text: Query<
@@ -167,10 +221,16 @@ pub fn update_profile_panel(
             Without<ProfileRecordsText>,
         ),
     >,
+    mut last_snapshot: Local<Option<ProfilePanelSnapshot>>,
 ) {
-    if !profile.is_changed() {
+    if *phase != GamePhase::Menu {
         return;
     }
+    let snapshot = ProfilePanelSnapshot::capture(&profile);
+    if *last_snapshot == Some(snapshot) {
+        return;
+    }
+    *last_snapshot = Some(snapshot);
     if let Ok(mut text) = palette_text.single_mut() {
         **text = format!(
             "Palette: {}  ({}/{})",
@@ -268,4 +328,30 @@ fn next_achievement_progress(profile: &Profile) -> String {
         target,
         requirement
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hidden_profile_panel_ignores_combat_record_changes() {
+        let mut world = World::new();
+        let mut profile = Profile::test_with_path(None);
+        profile.data.records.best_life_score = 99;
+        world.insert_resource(profile);
+        world.insert_resource(GamePhase::Playing);
+        let palette = world.spawn((PaletteNameText, Text::new("palette"))).id();
+        let records = world.spawn((ProfileRecordsText, Text::new("records"))).id();
+        let achievement = world
+            .spawn((AchievementProgressText, Text::new("achievement")))
+            .id();
+        world.clear_trackers();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(update_profile_panel);
+        schedule.run(&mut world);
+        for entity in [palette, records, achievement] {
+            assert!(!world.entity(entity).get_ref::<Text>().unwrap().is_changed());
+        }
+    }
 }
