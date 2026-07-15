@@ -1,0 +1,43 @@
+src/player.rs
+  s_5f7fd94dd65a55::t_c6496239978b75 111-119
+  s_5f7fd94dd65a55::t_cbc3dc365baec9 171-181
+  s_5f7fd94dd65a55::t_b3023ef50f828a 634,651-652
+src/main.rs
+  s_5f7fd94dd65a55::t_99e7c3b1d4d0d0 237-240
+  s_5f7fd94dd65a55::t_5aa0a8b79951c6 235-236
+src/collision.rs
+  s_5f7fd94dd65a55::t_ff9d7f415646f2 504,718,949,1011,1199,1379-1380,1559,1717-1718
+src/feedback.rs
+  s_5f7fd94dd65a55::t_46149fda91587e 318,441-442,453-454,523-524
+  s_5f7fd94dd65a55::t_ff9d7f415646f2 3,7,14-15,106-141,320,326,337,380,438,443,450-452,455-459,517-522,525-528
+  s_5f7fd94dd65a55::t_0d860ecbf036f8 529
+src/tank.rs
+  s_5f7fd94dd65a55::t_cbc3dc365baec9 37-40,156-161,168-175,180,182,200-205,207-215,217-218,222,226-228,232,234-236,404-417
+  s_5f7fd94dd65a55::t_c6496239978b75 42-44,418
+  s_5f7fd94dd65a55::t_8fe303cd0d1737 148,183-199,206,216,220-221
+  s_5f7fd94dd65a55::t_18a6db772e6e69 176-179
+  s_5f7fd94dd65a55::t_ff9d7f415646f2 34,219,239,242-244,394-403
+  s_5f7fd94dd65a55::t_462d7eae4875c0 233
+  s_5f7fd94dd65a55::t_70412fa87964f0 41
+  s_5f7fd94dd65a55::t_0c2e0314be89f6 237
+src/enemy_bot.rs
+  s_5f7fd94dd65a55::t_cbc3dc365baec9 451-457
+  s_5f7fd94dd65a55::t_b3023ef50f828a 1147-1148,1165-1166
+  s_5f7fd94dd65a55::t_c6496239978b75 665-673
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.14",
+  "base_commit_sha": "136f6bf1b19ac675bebc447274f2681e10b8733c",
+  "prompts": {},
+  "sessions": {
+    "s_5f7fd94dd65a55": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f61d7-5b6d-74a1-a0ae-032896a90606",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Vaspyyy <lolbautz2@gmail.com>"
+    }
+  }
+}
