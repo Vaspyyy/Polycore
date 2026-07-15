@@ -1,16 +1,18 @@
 use crate::{
     dominance::DominanceState,
-    enemy_bot::{EnemyBot, EnemyBotEvolution, EnemyBotVelocity},
+    enemy_bot::{EnemyBot, EnemyBotEvolution},
     evolution::{EvolutionKind, EvolutionState, PassiveKind},
     menu::GamePhase,
     passive::PassiveRuntime,
-    player::{MoveVelocity, Player, Velocity},
+    player::{MoveVelocity, Player},
     tank::RecentDamage,
 };
 use bevy::prelude::*;
 use std::collections::HashMap;
 
 const EFFECT_POOL_SIZE: usize = 96;
+const DAMAGE_INDICATOR_SIZE: f32 = 30.0;
+const DAMAGE_INDICATOR_RADIUS: f32 = 112.0;
 
 #[derive(Message, Clone, Copy)]
 pub struct CombatFeedback {
@@ -101,28 +103,42 @@ pub fn setup_feedback(
         shield_material: materials.add(Color::srgba(0.22, 0.78, 1.0, 0.72)),
         arc_material: materials.add(Color::srgba(0.72, 0.88, 1.0, 0.34)),
     });
-    commands.spawn((
-        DamageIndicator,
-        Node {
-            position_type: PositionType::Absolute,
-            left: Val::Percent(50.0),
-            top: Val::Percent(50.0),
-            width: Val::Px(34.0),
-            height: Val::Px(34.0),
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            ..default()
-        },
-        UiTransform::from_translation(Val2::px(-17.0, -125.0)),
-        Text::new("▼"),
-        TextFont {
-            font_size: FontSize::Px(28.0),
-            ..default()
-        },
-        TextColor(Color::srgba(1.0, 0.18, 0.16, 0.9)),
-        GlobalZIndex(45),
-        Visibility::Hidden,
-    ));
+    commands
+        .spawn((
+            DamageIndicator,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Percent(50.0),
+                top: Val::Percent(50.0),
+                width: Val::Px(DAMAGE_INDICATOR_SIZE),
+                height: Val::Px(DAMAGE_INDICATOR_SIZE),
+                ..default()
+            },
+            UiTransform::from_translation(Val2::px(
+                -DAMAGE_INDICATOR_SIZE / 2.0,
+                -DAMAGE_INDICATOR_RADIUS - DAMAGE_INDICATOR_SIZE / 2.0,
+            )),
+            GlobalZIndex(45),
+            Visibility::Hidden,
+            Pickable::IGNORE,
+        ))
+        .with_children(|indicator| {
+            for (index, width) in [20.0, 16.0, 12.0, 8.0, 4.0].into_iter().enumerate() {
+                indicator.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px((DAMAGE_INDICATOR_SIZE - width) / 2.0),
+                        top: Val::Px(6.0 + index as f32 * 3.0),
+                        width: Val::Px(width),
+                        height: Val::Px(4.0),
+                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BackgroundColor(Color::srgba(1.0, 0.18, 0.16, 0.92)),
+                    Pickable::IGNORE,
+                ));
+            }
+        });
     commands.spawn((
         PassiveStatusText,
         Node {
@@ -299,28 +315,18 @@ pub fn detect_feedback(
     mut tracker: ResMut<FeedbackTracker>,
     player_evolution: Res<EvolutionState>,
     dominance: Res<DominanceState>,
-    player: Query<
-        (Entity, &Transform, &Velocity, &RecentDamage),
-        (With<Player>, Without<EnemyBot>),
-    >,
+    player: Query<(Entity, &Transform, &RecentDamage), (With<Player>, Without<EnemyBot>)>,
     bots: Query<
-        (
-            Entity,
-            &Transform,
-            &EnemyBotVelocity,
-            &RecentDamage,
-            &EnemyBotEvolution,
-        ),
+        (Entity, &Transform, &RecentDamage, &EnemyBotEvolution),
         (With<EnemyBot>, Without<Player>),
     >,
     transforms: Query<&Transform>,
     mut messages: MessageWriter<CombatFeedback>,
 ) {
-    if let Ok((entity, transform, velocity, recent)) = player.single() {
+    if let Ok((entity, transform, recent)) = player.single() {
         detect_tank_feedback(
             entity,
             transform,
-            velocity.0,
             recent,
             player_evolution.current_kind,
             true,
@@ -328,11 +334,10 @@ pub fn detect_feedback(
             &mut messages,
         );
     }
-    for (entity, transform, velocity, recent, evolution) in &bots {
+    for (entity, transform, recent, evolution) in &bots {
         detect_tank_feedback(
             entity,
             transform,
-            velocity.0,
             recent,
             evolution.0.current_kind,
             false,
@@ -359,7 +364,6 @@ pub fn detect_feedback(
 fn detect_tank_feedback(
     entity: Entity,
     transform: &Transform,
-    velocity: Vec2,
     recent: &RecentDamage,
     evolution: EvolutionKind,
     is_player: bool,
@@ -373,7 +377,7 @@ fn detect_tank_feedback(
     if recent.remaining > previous + 0.01 {
         messages.write(CombatFeedback {
             position: transform.translation.xy(),
-            direction: -velocity.normalize_or_zero(),
+            direction: recent.direction,
             intensity: (recent.amount / 12.0).clamp(0.45, 1.5),
             is_player,
         });
@@ -431,14 +435,26 @@ pub fn consume_feedback(
             shake.remaining = shake.remaining.max(message.intensity * 0.16);
             if profile.data.settings.damage_indicators {
                 indicator.remaining = 0.65;
-                let angle = message.direction.to_angle() - std::f32::consts::FRAC_PI_2;
+                let (translation, rotation) = damage_indicator_pose(message.direction);
                 for (mut visibility, mut transform) in &mut indicator_query {
                     *visibility = Visibility::Visible;
-                    transform.rotation = Rot2::radians(angle);
+                    *transform =
+                        UiTransform::from_translation(Val2::px(translation.x, translation.y));
+                    transform.rotation = Rot2::radians(rotation);
                 }
             }
         }
     }
+}
+
+fn damage_indicator_pose(source_direction: Vec2) -> (Vec2, f32) {
+    let world_direction = source_direction.normalize_or(Vec2::Y);
+    let screen_direction = Vec2::new(world_direction.x, -world_direction.y);
+    let translation =
+        screen_direction * DAMAGE_INDICATOR_RADIUS - Vec2::splat(DAMAGE_INDICATOR_SIZE / 2.0);
+    let inward = -screen_direction;
+    let rotation = inward.to_angle() - std::f32::consts::FRAC_PI_2;
+    (translation, rotation)
 }
 
 pub fn update_feedback_effects(
@@ -497,5 +513,18 @@ mod tests {
             camera_shake_offset(&mut shake, 1.0 / 60.0, 1.0);
         }
         assert_eq!(shake.remaining, 0.0);
+    }
+
+    #[test]
+    fn damage_indicator_sits_toward_source_and_points_inward() {
+        for source_direction in [Vec2::X, Vec2::Y, Vec2::NEG_X, Vec2::NEG_Y] {
+            let (translation, rotation) = damage_indicator_pose(source_direction);
+            let center = translation + Vec2::splat(DAMAGE_INDICATOR_SIZE / 2.0);
+            let screen_direction = Vec2::new(source_direction.x, -source_direction.y).normalize();
+            let arrow_direction = Vec2::from_angle(rotation + std::f32::consts::FRAC_PI_2);
+
+            assert!(center.normalize().dot(screen_direction) > 0.999);
+            assert!(arrow_direction.dot(-screen_direction) > 0.999);
+        }
     }
 }

@@ -108,7 +108,15 @@ fn barrel_transform(spec: BarrelSpec, outline: bool, evolution: &EvolutionState)
     };
 
     Transform {
-        translation: Vec3::new(center.x, center.y, if outline { 0.1 } else { 0.2 }),
+        translation: Vec3::new(
+            center.x,
+            center.y,
+            if outline {
+                crate::tank::BARREL_OUTLINE_Z_OFFSET
+            } else {
+                crate::tank::BARREL_FILL_Z_OFFSET
+            },
+        ),
         rotation: Quat::from_rotation_z(spec.angle_offset),
         scale: Vec3::new(
             spec.width + outline_growth,
@@ -160,16 +168,17 @@ pub fn setup_player(
         ))
         .id();
 
-    commands.entity(player_entity).with_children(|player| {
-        player.spawn((
-            TankOutline,
-            Mesh2d(meshes.add(Circle::new(
-                constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
-            ))),
-            MeshMaterial2d(outline_material.clone()),
-            Transform::from_xyz(0.0, 0.0, -0.2),
-        ));
-    });
+    commands.spawn((
+        TankOutline {
+            owner: player_entity,
+        },
+        Mesh2d(meshes.add(Circle::new(
+            constants::PLAYER_RADIUS + constants::OUTLINE_THICKNESS,
+        ))),
+        MeshMaterial2d(outline_material.clone()),
+        Transform::from_xyz(0.0, 0.0, -0.2),
+        Visibility::Hidden,
+    ));
 
     let barrel_mesh = meshes.add(Rectangle::new(1.0, 1.0));
     let default_evolution = EvolutionState::default();
@@ -622,6 +631,7 @@ mod tests {
         let owner = Transform::from_xyz(120.0, -45.0, 0.0)
             .with_rotation(Quat::from_rotation_z(std::f32::consts::FRAC_PI_2));
         let local = barrel_transform(spec, false, &evolution);
+        let outline_local = barrel_transform(spec, true, &evolution);
         let world = owner.mul_transform(local);
 
         assert!(
@@ -638,6 +648,8 @@ mod tests {
                 .distance(owner.translation.truncate())
                 > constants::PLAYER_RADIUS
         );
+        assert!(outline_local.translation.z < local.translation.z);
+        assert!(local.translation.z < crate::tank::TANK_OUTLINE_Z_OFFSET);
     }
 
     #[test]

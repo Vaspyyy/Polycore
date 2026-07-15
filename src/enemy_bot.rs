@@ -448,14 +448,13 @@ pub fn setup_enemy_bots(
             .insert(crate::ability::Slowed::default())
             .id();
 
-        commands.entity(bot_entity).with_children(|bot| {
-            bot.spawn((
-                TankOutline,
-                Mesh2d(outline_mesh.clone()),
-                MeshMaterial2d(outline_material.clone()),
-                Transform::from_xyz(0.0, 0.0, -0.2),
-            ));
-        });
+        commands.spawn((
+            TankOutline { owner: bot_entity },
+            Mesh2d(outline_mesh.clone()),
+            MeshMaterial2d(outline_material.clone()),
+            Transform::from_xyz(position.x, position.y, -0.2),
+            Visibility::Hidden,
+        ));
 
         commands.spawn((
             EnemyBotHealthBarBack { owner: bot_entity },
@@ -663,7 +662,15 @@ pub(crate) fn enemy_bot_barrel_transform(
     };
 
     Transform {
-        translation: Vec3::new(center.x, center.y, if outline { -0.2 } else { -0.1 }),
+        translation: Vec3::new(
+            center.x,
+            center.y,
+            if outline {
+                crate::tank::BARREL_OUTLINE_Z_OFFSET
+            } else {
+                crate::tank::BARREL_FILL_Z_OFFSET
+            },
+        ),
         rotation: Quat::from_rotation_z(
             aim_angle + spec.angle_offset - std::f32::consts::FRAC_PI_2,
         ),
@@ -1137,6 +1144,8 @@ mod tests {
         let owner = Transform::from_xyz(-210.0, 95.0, 0.0);
         let local =
             enemy_bot_barrel_transform(spec, false, std::f32::consts::FRAC_PI_4, &evolution);
+        let outline_local =
+            enemy_bot_barrel_transform(spec, true, std::f32::consts::FRAC_PI_4, &evolution);
         let world = owner.mul_transform(local);
 
         assert!(
@@ -1153,6 +1162,8 @@ mod tests {
                 .distance(owner.translation.truncate())
                 > constants::PLAYER_RADIUS
         );
+        assert!(outline_local.translation.z < local.translation.z);
+        assert!(local.translation.z < crate::tank::TANK_OUTLINE_Z_OFFSET);
     }
 
     #[test]

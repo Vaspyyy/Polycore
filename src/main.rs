@@ -234,8 +234,13 @@ fn main() {
         )
         .add_systems(
             Update,
+            tank::update_tank_bodies
+                .after(menu::sync_phase_visibility)
+                .after(enemy_bot::sync_enemy_bot_visibility),
+        )
+        .add_systems(
+            Update,
             (
-                tank::update_tank_bodies,
                 shape::update_shape_health_bars,
                 leaderboard::update_leaderboard,
             )

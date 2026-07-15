@@ -31,10 +31,17 @@ impl SpawnProtection {
 pub struct RecentDamage {
     pub amount: f32,
     pub remaining: f32,
+    pub direction: Vec2,
 }
 
-#[derive(Component)]
-pub struct TankOutline;
+#[derive(Component, Clone, Copy, Debug)]
+pub struct TankOutline {
+    pub(crate) owner: Entity,
+}
+
+pub(crate) const BARREL_OUTLINE_Z_OFFSET: f32 = -0.4;
+pub(crate) const BARREL_FILL_Z_OFFSET: f32 = -0.3;
+pub(crate) const TANK_OUTLINE_Z_OFFSET: f32 = -0.2;
 
 #[derive(Resource, Clone)]
 pub struct TankBodyAssets {
@@ -138,7 +145,7 @@ pub fn update_tank_bodies(
     assets: Res<TankBodyAssets>,
     player_evolution: Res<EvolutionState>,
     mut players: Query<
-        (&mut Mesh2d, &Children),
+        (&Transform, &Visibility, &mut Mesh2d),
         (
             With<crate::player::Player>,
             Without<crate::enemy_bot::EnemyBot>,
@@ -146,62 +153,95 @@ pub fn update_tank_bodies(
         ),
     >,
     mut bots: Query<
-        (&crate::enemy_bot::EnemyBotEvolution, &mut Mesh2d, &Children),
+        (
+            &crate::enemy_bot::EnemyBotEvolution,
+            &Transform,
+            &Visibility,
+            &mut Mesh2d,
+        ),
         (
             With<crate::enemy_bot::EnemyBot>,
             Without<crate::player::Player>,
             Without<TankOutline>,
-            Changed<crate::enemy_bot::EnemyBotEvolution>,
         ),
     >,
-    mut outlines: Query<(&mut Mesh2d, &mut MeshMaterial2d<ColorMaterial>), With<TankOutline>>,
+    mut outlines: Query<
+        (
+            &TankOutline,
+            &mut Mesh2d,
+            &mut MeshMaterial2d<ColorMaterial>,
+            &mut Transform,
+            &mut Visibility,
+        ),
+        (
+            Without<crate::player::Player>,
+            Without<crate::enemy_bot::EnemyBot>,
+        ),
+    >,
 ) {
-    if player_evolution.is_changed()
-        && let Ok((mut body, children)) = players.single_mut()
-    {
-        apply_body(
-            &assets,
-            player_evolution.current_kind,
-            &mut body,
-            children,
-            &mut outlines,
-        );
-    }
-    for (evolution, mut body, children) in &mut bots {
-        apply_body(
-            &assets,
-            evolution.0.current_kind,
-            &mut body,
-            children,
-            &mut outlines,
-        );
-    }
-}
+    for (outline, mut mesh, mut material, mut transform, mut visibility) in &mut outlines {
+        let owner_state = if let Ok((owner_transform, owner_visibility, mut body)) =
+            players.get_mut(outline.owner)
+        {
+            let kind = player_evolution.current_kind;
+            set_mesh_if_changed(&mut body, assets.body(kind));
+            Some((kind, *owner_transform, *owner_visibility))
+        } else if let Ok((evolution, owner_transform, owner_visibility, mut body)) =
+            bots.get_mut(outline.owner)
+        {
+            let kind = evolution.0.current_kind;
+            set_mesh_if_changed(&mut body, assets.body(kind));
+            Some((kind, *owner_transform, *owner_visibility))
+        } else {
+            None
+        };
 
-fn apply_body(
-    assets: &TankBodyAssets,
-    kind: EvolutionKind,
-    body: &mut Mesh2d,
-    children: &Children,
-    outlines: &mut Query<(&mut Mesh2d, &mut MeshMaterial2d<ColorMaterial>), With<TankOutline>>,
-) {
-    body.0 = assets.body(kind);
-    for child in children.iter() {
-        if let Ok((mut mesh, mut material)) = outlines.get_mut(child) {
-            mesh.0 = assets.outline(kind);
-            material.0 = if kind.base() == EvolutionKind::Guard {
-                assets.guard_material.clone()
-            } else {
-                assets.outline_material.clone()
-            };
+        let Some((kind, owner_transform, owner_visibility)) = owner_state else {
+            if *visibility != Visibility::Hidden {
+                *visibility = Visibility::Hidden;
+            }
+            continue;
+        };
+
+        set_mesh_if_changed(&mut mesh, assets.outline(kind));
+        let next_material = if kind.base() == EvolutionKind::Guard {
+            assets.guard_material.clone()
+        } else {
+            assets.outline_material.clone()
+        };
+        if material.0 != next_material {
+            material.0 = next_material;
+        }
+
+        let next_transform = tank_outline_transform(&owner_transform);
+        if *transform != next_transform {
+            *transform = next_transform;
+        }
+        if *visibility != owner_visibility {
+            *visibility = owner_visibility;
         }
     }
 }
 
+fn set_mesh_if_changed(mesh: &mut Mesh2d, next: Handle<Mesh>) {
+    if mesh.0 != next {
+        mesh.0 = next;
+    }
+}
+
+fn tank_outline_transform(owner: &Transform) -> Transform {
+    let mut outline = *owner;
+    outline.translation.z += TANK_OUTLINE_Z_OFFSET;
+    outline
+}
+
 impl RecentDamage {
-    pub fn record(&mut self, amount: f32) {
+    pub fn record_from(&mut self, amount: f32, source_direction: Vec2) {
         self.amount = self.amount.mul_add(0.65, amount);
         self.remaining = 2.5;
+        if source_direction.length_squared() > f32::EPSILON {
+            self.direction = source_direction.normalize();
+        }
     }
 }
 
@@ -350,5 +390,30 @@ mod tests {
         assert!(protection.active());
         protection.cancel();
         assert!(!protection.active());
+    }
+
+    #[test]
+    fn recent_damage_tracks_the_source_direction() {
+        let mut damage = RecentDamage::default();
+
+        damage.record_from(6.0, Vec2::new(3.0, 4.0));
+
+        assert_eq!(damage.amount, 6.0);
+        assert_eq!(damage.remaining, 2.5);
+        assert!(damage.direction.distance(Vec2::new(0.6, 0.8)) < 0.0001);
+    }
+
+    #[test]
+    fn standalone_outline_tracks_the_complete_owner_transform() {
+        let owner = Transform::from_xyz(42.0, -18.0, 3.0)
+            .with_rotation(Quat::from_rotation_z(0.75))
+            .with_scale(Vec3::new(1.2, 0.9, 1.0));
+
+        let outline = tank_outline_transform(&owner);
+
+        assert_eq!(outline.translation.xy(), owner.translation.xy());
+        assert_eq!(outline.translation.z, owner.translation.z - 0.2);
+        assert_eq!(outline.rotation, owner.rotation);
+        assert_eq!(outline.scale, owner.scale);
     }
 }

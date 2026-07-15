@@ -501,7 +501,7 @@ pub fn check_projectile_enemy_bot_collisions(
                     slowed.amount = (slowed.amount + 0.06).min(0.30);
                     slowed.remaining = 3.0;
                 }
-                recent_damage.record(applied_damage);
+                recent_damage.record_from(applied_damage, -projectile_velocity.0);
                 let knockback_dir = (bot_transform.translation.xy() - proj_pos).normalize_or_zero();
                 velocity.0 += knockback_dir
                     * constants::PLAYER_COLLISION_KNOCKBACK_SPEED
@@ -715,7 +715,7 @@ pub fn check_projectile_player_collisions(
             splash_ready.0 = false;
         }
         let was_killed = apply_player_damage(&mut player_health, applied_damage);
-        recent_damage.record(applied_damage);
+        recent_damage.record_from(applied_damage, -projectile_velocity.0);
         penetration.0 = penetration.0.saturating_sub(1);
         if penetration.0 == 0 {
             commands.entity(proj_entity).despawn();
@@ -946,7 +946,7 @@ pub fn resolve_pending_splashes(
                     false,
                     speed_fraction,
                 );
-                recent.record(damage);
+                recent.record_from(damage, splash.position - transform.translation.xy());
                 if apply_player_damage(&mut health, damage) {
                     let owner = match splash.owner {
                         ProjectileOwner::EnemyBot(owner) => owner,
@@ -1008,7 +1008,7 @@ pub fn resolve_pending_splashes(
             if let Some(attacker) = attacker {
                 brain.note_attacker(attacker);
             }
-            recent.record(damage);
+            recent.record_from(damage, splash.position - transform.translation.xy());
             if apply_enemy_bot_damage(&mut health, damage) {
                 finish_enemy_bot_death(
                     entity,
@@ -1196,7 +1196,7 @@ pub fn check_player_shape_collisions(
         ) * active_damage_multiplier;
         let shape_killed = apply_shape_damage(&mut shape_health, damage_to_shape);
         let player_killed = apply_player_damage(&mut player_health, damage_to_player);
-        recent_damage.record(damage_to_player);
+        recent_damage.record_from(damage_to_player, -normal);
         shape_contact_cooldown.0 = 0.0;
         damage_cooldown.0 = 0.0;
         if shape_killed {
@@ -1376,8 +1376,8 @@ pub fn check_player_enemy_bot_collisions(
                 .single()
                 .map_or(1.0, ActiveAbilityState::damage_multiplier);
             bot_brain.note_attacker(player_entity);
-            bot_recent_damage.record(damage_to_bot);
-            player_recent_damage.record(damage_to_player);
+            bot_recent_damage.record_from(damage_to_bot, normal);
+            player_recent_damage.record_from(damage_to_player, -normal);
             let bot_killed = apply_enemy_bot_damage(&mut bot_health, damage_to_bot);
             let player_killed = apply_player_damage(&mut player_health, damage_to_player);
             if bot_killed {
@@ -1556,7 +1556,7 @@ pub fn check_enemy_bot_shape_collisions(
                 .map_or(1.0, ActiveAbilityState::damage_multiplier);
             let shape_killed = apply_shape_damage(&mut shape_health, damage_to_shape);
             let bot_killed = apply_enemy_bot_damage(&mut bot_health, damage_to_bot);
-            recent_damage.record(damage_to_bot);
+            recent_damage.record_from(damage_to_bot, -normal);
             shape_contact_cooldown.0 = 0.0;
             damage_cooldown.0 = 0.0;
             if shape_killed {
@@ -1714,8 +1714,8 @@ pub fn check_enemy_bot_enemy_bot_collisions(
                     .map_or(1.0, ActiveAbilityState::damage_multiplier);
                 brain_a.note_attacker(entity_b);
                 brain_b.note_attacker(entity_a);
-                recent_a.record(damage_a);
-                recent_b.record(damage_b);
+                recent_a.record_from(damage_a, -normal);
+                recent_b.record_from(damage_b, normal);
                 let killed_a = apply_enemy_bot_damage(&mut health_a, damage_a);
                 let killed_b = apply_enemy_bot_damage(&mut health_b, damage_b);
                 if killed_a {
