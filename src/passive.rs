@@ -264,6 +264,19 @@ impl PassiveRuntime {
         }
     }
 
+    pub fn projectile_shape_hit_multiplier(
+        &mut self,
+        evolution: EvolutionKind,
+        target: Entity,
+        travel_distance: f32,
+    ) -> f32 {
+        if crate::evolution::definition(evolution).passive == PassiveKind::DistanceDamage {
+            1.0
+        } else {
+            self.projectile_hit_multiplier(evolution, target, travel_distance)
+        }
+    }
+
     pub fn incoming_damage(
         &mut self,
         evolution: EvolutionKind,
@@ -478,6 +491,35 @@ mod tests {
             let actual = needler.projectile_hit_multiplier(EvolutionKind::Needler, target, 0.0);
             assert!((actual - expected).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn distance_damage_applies_to_tanks_but_not_neutral_shapes() {
+        let target = Entity::from_bits(8);
+        let mut runtime = PassiveRuntime::default();
+
+        for evolution in [
+            EvolutionKind::RailCannon,
+            EvolutionKind::Marksman,
+            EvolutionKind::Lancer,
+            EvolutionKind::Deadeye,
+        ] {
+            assert!(runtime.projectile_hit_multiplier(evolution, target, 2_000.0) > 1.0);
+            assert_eq!(
+                runtime.projectile_shape_hit_multiplier(evolution, target, 2_000.0),
+                1.0
+            );
+        }
+
+        let mut hunter = PassiveRuntime::default();
+        assert_eq!(
+            hunter.projectile_shape_hit_multiplier(EvolutionKind::Hunter, target, 0.0),
+            1.0
+        );
+        assert_eq!(
+            hunter.projectile_shape_hit_multiplier(EvolutionKind::Hunter, target, 0.0),
+            1.25
+        );
     }
 
     #[test]

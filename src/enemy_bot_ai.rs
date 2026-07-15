@@ -1354,9 +1354,8 @@ fn shoot_enemy_bot_projectiles(
         * evolution.0.bullet_speed_multiplier()
         * adjustments.speed_multiplier
         * primed.speed;
-    let lifetime = constants::PROJECTILE_LIFETIME
-        * evolution.0.projectile_lifetime_multiplier()
-        * primed.lifetime;
+    let lifetime =
+        crate::projectile::projectile_lifetime(&upgrades.0, &evolution.0, primed.lifetime);
     let knockback = evolution.0.bullet_knockback_multiplier();
     let projectile_radius = crate::projectile::projectile_radius(&upgrades.0, &evolution.0);
     let projectile_scale = projectile_radius / constants::PROJECTILE_RADIUS;

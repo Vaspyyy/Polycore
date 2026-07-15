@@ -662,7 +662,7 @@ pub fn execute_ability_casts(
         };
         let damage = upgrades.bullet_damage() * evolution.bullet_damage_multiplier();
         let speed = upgrades.bullet_speed() * evolution.bullet_speed_multiplier();
-        let lifetime = constants::PROJECTILE_LIFETIME * evolution.projectile_lifetime_multiplier();
+        let lifetime = crate::projectile::projectile_lifetime(upgrades, evolution, 1.0);
         let radius = crate::projectile::projectile_radius(upgrades, evolution);
 
         let construct_count = |construct_kind| {

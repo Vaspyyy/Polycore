@@ -198,7 +198,7 @@ pub fn check_collisions(
                         match *projectile_owner {
                             ProjectileOwner::Player => {
                                 player_runtime.single_mut().map_or(1.0, |mut runtime| {
-                                    runtime.projectile_hit_multiplier(
+                                    runtime.projectile_shape_hit_multiplier(
                                         projectile_evolution.0,
                                         shape_entity,
                                         travel.0,
@@ -207,7 +207,7 @@ pub fn check_collisions(
                             }
                             ProjectileOwner::EnemyBot(owner) => {
                                 bot_runtimes.get_mut(owner).map_or(1.0, |mut runtime| {
-                                    runtime.projectile_hit_multiplier(
+                                    runtime.projectile_shape_hit_multiplier(
                                         projectile_evolution.0,
                                         shape_entity,
                                         travel.0,

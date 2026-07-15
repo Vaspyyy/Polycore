@@ -57,6 +57,7 @@ const UPGRADE_KEYS: [KeyCode; UPGRADE_COUNT] = [
 pub enum UpgradeKind {
     HealthRegen = HEALTH_REGEN_INDEX,
     MaxHealth = MAX_HEALTH_INDEX,
+    BulletSpeed = BULLET_SPEED_INDEX,
     BulletDamage = BULLET_DAMAGE_INDEX,
     MovementSpeed = MOVEMENT_SPEED_INDEX,
 }
@@ -183,7 +184,11 @@ impl UpgradeState {
     }
 
     pub fn bullet_speed(&self) -> f32 {
-        constants::PROJECTILE_SPEED * (1.0 + self.levels[BULLET_SPEED_INDEX] as f32 * 0.08)
+        constants::PROJECTILE_SPEED * self.bullet_speed_multiplier()
+    }
+
+    pub fn bullet_speed_multiplier(&self) -> f32 {
+        1.0 + self.level_of(UpgradeKind::BulletSpeed) as f32 * 0.08
     }
 
     pub fn bullet_penetration(&self) -> u32 {

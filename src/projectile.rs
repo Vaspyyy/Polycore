@@ -97,6 +97,18 @@ pub fn projectile_radius(upgrades: &UpgradeState, evolution: &EvolutionState) ->
     constants::PROJECTILE_RADIUS * damage_upgrade_scale * evolution.projectile_size_multiplier()
 }
 
+pub fn projectile_lifetime(
+    upgrades: &UpgradeState,
+    evolution: &EvolutionState,
+    lifetime_multiplier: f32,
+) -> f32 {
+    let speed_upgrade_multiplier = upgrades.bullet_speed_multiplier().max(f32::EPSILON);
+    constants::PROJECTILE_LIFETIME
+        * evolution.projectile_lifetime_multiplier()
+        * lifetime_multiplier
+        / speed_upgrade_multiplier
+}
+
 pub fn shoot_projectile(
     mut commands: Commands,
     assets: Res<ProjectileAssets>,
@@ -166,9 +178,7 @@ pub fn shoot_projectile(
         * evolution.bullet_speed_multiplier()
         * adjustments.speed_multiplier
         * primed.speed;
-    let lifetime = constants::PROJECTILE_LIFETIME
-        * evolution.projectile_lifetime_multiplier()
-        * primed.lifetime;
+    let lifetime = projectile_lifetime(&upgrades, &evolution, primed.lifetime);
     let knockback = evolution.bullet_knockback_multiplier();
     let projectile_radius = projectile_radius(&upgrades, &evolution);
     let projectile_scale = projectile_radius / constants::PROJECTILE_RADIUS;
@@ -323,6 +333,47 @@ mod tests {
                 > projectile_radius(&base_upgrades, &cannon)
         );
         assert_eq!(projectile_radius(&base_upgrades, &rail_cannon), base_radius);
+    }
+
+    #[test]
+    fn bullet_speed_upgrades_do_not_increase_projectile_range() {
+        let base_upgrades = UpgradeState::default();
+        let mut speed_upgrades = base_upgrades.clone();
+        speed_upgrades.levels[UpgradeKind::BulletSpeed.index()] = 8;
+
+        for (kind, expected_range) in [
+            (EvolutionKind::Tank, 800.0),
+            (EvolutionKind::Sniper, 2_012.8),
+            (EvolutionKind::Marksman, 2_717.28),
+            (EvolutionKind::Deadeye, 3_169.4),
+        ] {
+            let evolution = EvolutionState {
+                current_kind: kind,
+                ..default()
+            };
+            let base_range = base_upgrades.bullet_speed()
+                * evolution.bullet_speed_multiplier()
+                * projectile_lifetime(&base_upgrades, &evolution, 1.0);
+            let upgraded_range = speed_upgrades.bullet_speed()
+                * evolution.bullet_speed_multiplier()
+                * projectile_lifetime(&speed_upgrades, &evolution, 1.0);
+
+            assert!((base_range - upgraded_range).abs() < 0.001, "{kind:?}");
+            assert!((base_range - expected_range).abs() < 0.1, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn primed_lifetime_multiplier_still_extends_projectile_range() {
+        let upgrades = UpgradeState::default();
+        let deadeye = EvolutionState {
+            current_kind: EvolutionKind::Deadeye,
+            ..default()
+        };
+        let normal = projectile_lifetime(&upgrades, &deadeye, 1.0);
+        let primed = projectile_lifetime(&upgrades, &deadeye, 1.5);
+
+        assert!((primed / normal - 1.5).abs() < 0.000_1);
     }
 
     #[test]
